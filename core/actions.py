@@ -6,7 +6,9 @@ import signal
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +27,129 @@ def _resolve_focus_script() -> Optional[Path]:
     if _BUNDLED_FOCUS_SCRIPT.exists():
         return _BUNDLED_FOCUS_SCRIPT
     return None
+
+
+def session_cli_command(platform: str, session_id: str, cwd: str, fork: bool = False) -> str:
+    """Build the interactive CLI command for resuming/forking a saved session."""
+    platform = (platform or "claude").lower()
+    cwd = cwd or str(Path.home())
+    if platform == "claude":
+        args = ["claude", "--resume", session_id]
+        if fork:
+            args.append("--fork-session")
+    elif platform == "codex":
+        args = ["codex", "fork" if fork else "resume", session_id]
+    else:
+        raise ValueError(f"{platform} sessions cannot be resumed from this dashboard yet")
+
+    return f"cd {shlex.quote(cwd)} && {shlex.join(args)}"
+
+
+def _configured_terminal_command(command: str, cwd: str) -> Optional[list[str]]:
+    """Allow users to override terminal launch without changing code.
+
+    Example:
+      CLAUDE_FLEET_TERMINAL_CMD='tmux new-window -c {cwd} {cmd}'
+    """
+    template = os.environ.get("CLAUDE_FLEET_TERMINAL_CMD", "").strip()
+    if not template:
+        return None
+    rendered = template.format(
+        cmd=shlex.quote(command),
+        cwd=shlex.quote(cwd),
+        raw_cmd=command,
+        raw_cwd=cwd,
+    )
+    return ["/bin/sh", "-lc", rendered]
+
+
+def _user_shell() -> str:
+    shell = os.environ.get("SHELL", "")
+    if shell and Path(shell).exists():
+        return shell
+    return "/bin/sh"
+
+
+def _shell_args(command: str) -> list[str]:
+    return [_user_shell(), "-lc", command]
+
+
+def _macos_terminal_command(command: str, cwd: str) -> Optional[list[str]]:
+    if sys.platform != "darwin" or not shutil.which("open"):
+        return None
+
+    script = Path(tempfile.gettempdir()) / f"claude-fleet-{uuid.uuid4().hex}.command"
+    script.write_text(f"#!/bin/bash\nexec {shlex.join(_shell_args(command))}\n", encoding="utf-8")
+    script.chmod(0o700)
+    return ["open", "-a", "Terminal", str(script)]
+
+
+def _linux_terminal_command(command: str, cwd: str) -> Optional[list[str]]:
+    if not sys.platform.startswith("linux"):
+        return None
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return None
+
+    launchers = [
+        ("x-terminal-emulator", ["x-terminal-emulator", "-e", *_shell_args(command)]),
+        ("gnome-terminal", ["gnome-terminal", "--working-directory", cwd, "--", *_shell_args(command)]),
+        ("konsole", ["konsole", "--workdir", cwd, "-e", *_shell_args(command)]),
+        ("xfce4-terminal", ["xfce4-terminal", "--working-directory", cwd, "-e", shlex.join(_shell_args(command))]),
+        ("alacritty", ["alacritty", "--working-directory", cwd, "-e", *_shell_args(command)]),
+        ("kitty", ["kitty", "--directory", cwd, *_shell_args(command)]),
+        ("wezterm", ["wezterm", "start", "--cwd", cwd, "--", *_shell_args(command)]),
+        ("xterm", ["xterm", "-e", *_shell_args(command)]),
+    ]
+    for exe, argv in launchers:
+        if shutil.which(exe):
+            return argv
+    return None
+
+
+def _terminal_command(command: str, cwd: str) -> Optional[list[str]]:
+    return (
+        _configured_terminal_command(command, cwd)
+        or _linux_terminal_command(command, cwd)
+        or _macos_terminal_command(command, cwd)
+    )
+
+
+def launch_session(platform: str, session_id: str, cwd: str, fork: bool = False) -> dict:
+    """Launch an interactive CLI session in a real terminal when possible."""
+    cwd = cwd or str(Path.home())
+    try:
+        command = session_cli_command(platform, session_id, cwd, fork=fork)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+    term_cmd = _terminal_command(command, cwd)
+    if not term_cmd:
+        return {
+            "ok": False,
+            "error": "no supported terminal launcher found; run the command manually",
+            "command": command,
+            "platform": platform,
+        }
+
+    try:
+        subprocess.Popen(
+            term_cmd,
+            cwd=cwd if Path(cwd).is_dir() else None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e), "command": command, "platform": platform}
+
+    return {
+        "ok": True,
+        "action": "forked" if fork else "resumed",
+        "session_id": session_id,
+        "cwd": cwd,
+        "platform": platform,
+        "command": command,
+    }
 
 
 def focus_terminal(tty: str) -> dict:
@@ -74,41 +199,12 @@ def focus_terminal(tty: str) -> dict:
     }
 
 
-_FORK_APPLESCRIPT_ITERM = '''
-tell application "iTerm2"
-    activate
-    set newWin to (create window with default profile)
-    tell current session of newWin
-        write text {cmd}
-    end tell
-end tell
-'''
-
-
 def fork_session(pid: int) -> dict:
-    """Open a new iTerm2 window and fork the session (new ID, inherits history)."""
+    """Open a terminal and fork the live Claude session."""
     w = find_window(pid)
     if not w:
         return {"ok": False, "error": f"no window pid={pid}"}
-
-    inner = f"cd {shlex.quote(w.cwd)} && claude --resume {shlex.quote(w.session_id)} --fork-session"
-    quoted_for_applescript = '"' + inner.replace('\\', '\\\\').replace('"', '\\"') + '"'
-    script = _FORK_APPLESCRIPT_ITERM.format(cmd=quoted_for_applescript)
-
-    try:
-        proc = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=10,
-        )
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    return {
-        "ok": proc.returncode == 0,
-        "cwd": w.cwd,
-        "session_id": w.session_id,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-    }
+    return launch_session("claude", w.session_id, w.cwd, fork=True)
 
 
 def _render_session_markdown(pid: int, limit: int = 80) -> Optional[tuple[str, str]]:
@@ -348,37 +444,9 @@ def close_session(pid: int) -> dict:
     return {"ok": True, "pid": pid, "message": f"SIGTERM sent to {pid}"}
 
 
-_REVIEW_PROMPT = "请 review 你刚才做的工作，检查是否有低级错误、遗漏、安全问题。列出发现的问题和修复建议。"
-
-
 def review_session(pid: int) -> dict:
-    """Open a new iTerm2 window, resume the session, and send a review prompt."""
+    """Open a terminal and resume the session for manual review."""
     w = find_window(pid)
     if not w:
         return {"ok": False, "error": f"no window pid={pid}"}
-
-    resume_cmd = f"cd {shlex.quote(w.cwd)} && claude --resume {shlex.quote(w.session_id)}"
-    # AppleScript: open new window → type resume command → wait a bit → type review prompt
-    escaped_resume = resume_cmd.replace('\\', '\\\\').replace('"', '\\"')
-    escaped_review = _REVIEW_PROMPT.replace('\\', '\\\\').replace('"', '\\"')
-    script = f'''tell application "iTerm2"
-    activate
-    set newWin to (create window with default profile)
-    tell current session of newWin
-        write text "{escaped_resume}"
-        delay 3
-        write text "{escaped_review}"
-    end tell
-end tell'''
-    try:
-        proc = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=15,
-        )
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    return {
-        "ok": proc.returncode == 0,
-        "pid": pid,
-        "session_id": w.session_id,
-    }
+    return launch_session("claude", w.session_id, w.cwd, fork=False)

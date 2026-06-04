@@ -672,7 +672,7 @@ function fleet() {
     async forkWindow(pid) {
       const r = await fetch(`/api/windows/${pid}/fork`, { method: 'POST' });
       const d = await r.json();
-      this.toast(d.ok ? 'Forked → new session (inherits history)' : 'Fork failed: ' + (d.error || ''));
+      await this.handleLaunchResult(d, 'Forked → new session (inherits history)', 'Fork failed');
     },
 
     async reviewWindow(pid) {
@@ -803,14 +803,14 @@ function fleet() {
       if (d.ok) {
         this.toast(d.action === 'focused' ? 'Focused existing window' : 'Resumed session');
       } else {
-        this.toast('Resume failed: ' + (d.error || ''));
+        await this.handleLaunchResult(d, 'Resumed session', 'Resume failed');
       }
     },
 
     async forkHistorySession(s) {
       const r = await fetch(`/api/history/${s.session_id}/fork`, { method: 'POST' });
       const d = await r.json();
-      this.toast(d.ok ? 'Forked → new session (inherits history)' : 'Fork failed: ' + (d.error || ''));
+      await this.handleLaunchResult(d, 'Forked → new session (inherits history)', 'Fork failed');
     },
 
     scrollToSkill(skillName) {
@@ -921,6 +921,23 @@ function fleet() {
     toast(msg) {
       this.toasts.push(msg);
       if (this.toasts.length > 5) this.toasts.shift();
+    },
+
+    async handleLaunchResult(d, successMsg, failPrefix) {
+      if (d.ok) {
+        this.toast(successMsg);
+        return;
+      }
+      let suffix = '';
+      if (d.command) {
+        try {
+          await navigator.clipboard.writeText(d.command);
+          suffix = ' (command copied)';
+        } catch (_) {
+          suffix = ': ' + d.command;
+        }
+      }
+      this.toast(failPrefix + ': ' + (d.error || 'unknown error') + suffix);
     },
   };
 }
