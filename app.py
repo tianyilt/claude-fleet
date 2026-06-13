@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from core import actions, codex, history, memory, patrol, perms, plans, search, sessions, skills, transcripts
+from core import actions, codex, history, memory, patrol, perms, plans, search, sessions, skills, terminal, transcripts
 
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
@@ -184,17 +184,12 @@ def api_focus(pid: int) -> dict:
         raise HTTPException(404, "window not found")
     if not w.tty:
         return {"ok": False, "error": "no tty available for this pid"}
-    return actions.focus_terminal(w.tty)
+    return terminal.focus(w.tty)
 
 
 @app.post("/api/windows/{pid}/fork")
 def api_fork(pid: int) -> dict:
     return actions.fork_session(pid)
-
-
-@app.post("/api/windows/{pid}/export")
-def api_export(pid: int) -> dict:
-    return actions.export_to_feishu(pid)
 
 
 @app.post("/api/windows/{pid}/close")
@@ -253,72 +248,45 @@ def api_history_timeline(session_id: str, limit: int = 2000) -> dict:
     raise HTTPException(404, "transcript not found")
 
 
+def _find_history_cwd(session_id: str) -> tuple[bool, str]:
+    """Return (found, cwd) for a session_id from the history index."""
+    data = history.list_sessions(limit=9999)
+    for s in data["sessions"]:
+        if s["session_id"] == session_id:
+            return True, (s.get("project") or str(Path.home()))
+    return False, ""
+
+
 @app.post("/api/history/{session_id}/resume")
 def api_history_resume(session_id: str) -> dict:
-    import shlex, subprocess
+    import shlex
     # If the session is alive, focus it instead of opening a new window.
     for w in sessions.list_windows():
         if w.session_id == session_id and w.alive and w.tty:
-            result = actions.focus_terminal(w.tty)
-            return {"ok": result.get("ok", False), "action": "focused", "session_id": session_id, "pid": w.pid}
+            result = terminal.focus(w.tty)
+            return {"ok": result.get("ok", False), "action": "focused",
+                    "session_id": session_id, "pid": w.pid, "error": result.get("error"),
+                    "fallback_cmd": result.get("fallback_cmd")}
 
-    data = history.list_sessions(limit=9999)
-    sess = None
-    for s in data["sessions"]:
-        if s["session_id"] == session_id:
-            sess = s
-            break
-    if not sess:
+    found, cwd = _find_history_cwd(session_id)
+    if not found:
         return {"ok": False, "error": "session not found in index"}
-    cwd = sess.get("project") or str(Path.home())
     inner = f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(session_id)}"
-    quoted = '"' + inner.replace('\\', '\\\\').replace('"', '\\"') + '"'
-    script = f'''tell application "iTerm2"
-    activate
-    set newWin to (create window with default profile)
-    tell current session of newWin
-        write text {quoted}
-    end tell
-end tell'''
-    try:
-        proc = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=10,
-        )
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    return {"ok": proc.returncode == 0, "action": "resumed", "session_id": session_id, "cwd": cwd}
+    result = terminal.spawn_window(inner)
+    return {"ok": result["ok"], "action": "resumed", "session_id": session_id,
+            "cwd": cwd, "error": result.get("error"), "fallback_cmd": result.get("fallback_cmd")}
 
 
 @app.post("/api/history/{session_id}/fork")
 def api_history_fork(session_id: str) -> dict:
-    import shlex, subprocess
-    data = history.list_sessions(limit=9999)
-    sess = None
-    for s in data["sessions"]:
-        if s["session_id"] == session_id:
-            sess = s
-            break
-    if not sess:
+    import shlex
+    found, cwd = _find_history_cwd(session_id)
+    if not found:
         return {"ok": False, "error": "session not found in index"}
-    cwd = sess.get("project") or str(Path.home())
     inner = f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(session_id)} --fork-session"
-    quoted = '"' + inner.replace('\\', '\\\\').replace('"', '\\"') + '"'
-    script = f'''tell application "iTerm2"
-    activate
-    set newWin to (create window with default profile)
-    tell current session of newWin
-        write text {quoted}
-    end tell
-end tell'''
-    try:
-        proc = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=10,
-        )
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    return {"ok": proc.returncode == 0, "action": "forked", "session_id": session_id, "cwd": cwd}
+    result = terminal.spawn_window(inner)
+    return {"ok": result["ok"], "action": "forked", "session_id": session_id,
+            "cwd": cwd, "error": result.get("error"), "fallback_cmd": result.get("fallback_cmd")}
 
 
 @app.get("/api/skills/{name}/sessions")

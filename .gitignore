@@ -6,6 +6,13 @@ __pycache__/
 *.output
 .DS_Store
 
+# built macOS app bundle + pytest cache
+dist/
+.pytest_cache/
+
 # generated demo data + public mirror clone
 fixtures/demo-home/
 .public-mirror/
+
+# codex/imagegen scratch
+.tmp/

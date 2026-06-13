@@ -1,6 +1,7 @@
 """Index all past sessions from history.jsonl + projects/**/*.jsonl + codex."""
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import subprocess
@@ -12,6 +13,26 @@ from typing import Optional
 from .sessions import CLAUDE_HOME, HOME_BASE, PROJECTS_DIR
 
 HISTORY_JSONL = CLAUDE_HOME / "history.jsonl"
+
+
+def _norm_ts(ts) -> str:
+    """Normalize a timestamp to an ISO string.
+
+    Newer Claude Code writes history.jsonl `timestamp` as an epoch number
+    (seconds or milliseconds) instead of an ISO string; the frontend calls
+    `.slice()` on it, so a number throws and breaks Alpine row rendering.
+    """
+    if isinstance(ts, str):
+        return ts
+    if isinstance(ts, (int, float)):
+        secs = ts / 1000 if ts > 1e12 else ts
+        try:
+            return datetime.datetime.fromtimestamp(
+                secs, tz=datetime.timezone.utc
+            ).isoformat()
+        except (ValueError, OverflowError, OSError):
+            return ""
+    return ""
 
 
 @dataclass
@@ -55,7 +76,7 @@ def _load_history_jsonl() -> dict[str, dict]:
                 if not sid:
                     continue
                 display = d.get("display", "")
-                ts = d.get("timestamp", "")
+                ts = _norm_ts(d.get("timestamp", ""))
                 project = d.get("project", "")
                 if sid not in out:
                     out[sid] = {
@@ -148,6 +169,37 @@ def _extract_skills_from_transcript(path: Path) -> list[str]:
     return skills
 
 
+# Per-transcript enrichment cache keyed by path -> (mtime, size, enrichment).
+# Parsing a transcript (skills/memory/model) is the dominant cost of _build_index
+# and the file is immutable once a session ends, so cache by (mtime, size) and
+# only re-parse files that actually changed.
+_enrich_cache: dict[str, tuple[int, int, dict]] = {}
+
+
+def _enrich_transcript(tp: str, mtime: int, size: int) -> dict:
+    cached = _enrich_cache.get(tp)
+    if cached and cached[0] == mtime and cached[1] == size:
+        return cached[2]
+    from .transcripts import extract_memory_ops, count_skill_activity, count_memory_activity
+    path = Path(tp)
+    sa = count_skill_activity(tp)
+    enrichment = {
+        "first_input": _extract_first_user_text(path),
+        "skills": _extract_skills_from_transcript(path),
+        "mem_ops": extract_memory_ops(tp),
+        "model": _extract_model(path),
+        "skill_breakdown": {
+            "per_skill_invokes": sa.get("per_skill_invokes", {}),
+            "per_skill_reads": sa.get("per_skill_reads", {}),
+            "per_skill_writes": sa.get("per_skill_writes", {}),
+            "per_skill_bash_refs": sa.get("per_skill_bash_refs", {}),
+        },
+        "memory_breakdown": count_memory_activity(tp),
+    }
+    _enrich_cache[tp] = (mtime, size, enrichment)
+    return enrichment
+
+
 def _build_index() -> list[HistorySession]:
     hist = _load_history_jsonl()
     transcripts = _scan_transcripts()
@@ -166,9 +218,6 @@ def _build_index() -> list[HistorySession]:
         )
 
         first_input = h.get("first_input", "")
-        if not first_input and t.get("path"):
-            first_input = _extract_first_user_text(Path(t["path"]))
-
         skills = []
         mem_ops = []
         model = ""
@@ -176,18 +225,14 @@ def _build_index() -> list[HistorySession]:
         memory_breakdown = {}
         tp = t.get("path")
         if tp:
-            skills = _extract_skills_from_transcript(Path(tp))
-            from .transcripts import extract_memory_ops, count_skill_activity, count_memory_activity
-            mem_ops = extract_memory_ops(tp)
-            model = _extract_model(Path(tp))
-            sa = count_skill_activity(tp)
-            skill_breakdown = {
-                "per_skill_invokes": sa.get("per_skill_invokes", {}),
-                "per_skill_reads": sa.get("per_skill_reads", {}),
-                "per_skill_writes": sa.get("per_skill_writes", {}),
-                "per_skill_bash_refs": sa.get("per_skill_bash_refs", {}),
-            }
-            memory_breakdown = count_memory_activity(tp)
+            enr = _enrich_transcript(tp, t.get("mtime", 0), t.get("size", 0))
+            if not first_input:
+                first_input = enr["first_input"]
+            skills = enr["skills"]
+            mem_ops = enr["mem_ops"]
+            model = enr["model"]
+            skill_breakdown = enr["skill_breakdown"]
+            memory_breakdown = enr["memory_breakdown"]
 
         sessions.append(HistorySession(
             session_id=sid,

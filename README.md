@@ -18,6 +18,39 @@ cd claude-fleet && bash run.sh
 
 The first run creates a venv and installs dependencies automatically — nothing to set up.
 
+## Install options
+
+**Run as a macOS app (recommended on Mac).** Packaging Fleet as a signed `.app`
+gives it a stable code identity, so macOS binds the "control iTerm2" Automation
+grant to it permanently — resume/fork/focus keep working even across restarts
+(a plain `./run.sh` backgrounded process can lose that permission once its
+terminal closes):
+
+```bash
+./scripts/build-app.sh --install      # builds + copies to /Applications
+```
+
+Launch *Claude Fleet* from /Applications, click **Resume** on any session once,
+and approve **“Claude Fleet” wants to control “iTerm.app”**. For development with
+hot-reload, keep using `./run.sh`.
+
+**Run anywhere (Windows / Linux).** The dashboard, history, search and monitoring
+are cross-platform:
+
+```bash
+pip install -e .
+./run.sh        # macOS/Linux
+run.bat         # Windows
+```
+
+Opening/focusing a real terminal window is macOS-only (iTerm2). On Windows/Linux,
+resume/fork instead copy the `claude --resume …` command to your clipboard for you
+to paste into your own terminal.
+
+**Releases.** Tagged releases ship three artifacts: `claude-fleet-macos-app.zip`
+(double-clickable app), `claude-fleet-src.tar.gz` (run anywhere), and
+`claude-fleet-windows.zip`.
+
 ## What it solves
 
 The everyday pain of multi-window vibe coding:
@@ -98,14 +131,17 @@ Write is a full snapshot, each Edit is a red/green diff.
 | Resume | `claude --resume <sid>` — continue the original session |
 | Review | run `claude -p` review in the background; the verdict (PASS/FAIL/PARTIAL) shows on the card |
 | Close | SIGTERM |
-| Export | export a conversation doc (timeline + plan history + skill/memory summary) |
+
+On Windows/Linux the dashboard still works, but Fork/Resume can't open a native
+window — they copy the `claude --resume …` command to your clipboard to paste into
+your own terminal.
 
 > **Focus setup (macOS).** Focus works out of the box on Terminal.app and iTerm2 —
-> including when your sessions run inside **tmux** (the bundled
-> [`scripts/focus-tty.sh`](scripts/focus-tty.sh) maps the process tty → the owning
-> terminal tab → raises it). To customize for another terminal or window manager,
-> drop an executable `~/.claude/focus-tty.sh` taking a `<tty>` arg; it takes
-> precedence over the bundled default.
+> including when your sessions run inside **tmux** — via the bundled
+> [`scripts/focus-tty.sh`](scripts/focus-tty.sh) (maps process tty → owning terminal
+> tab → raises it). To customize for another terminal/window manager, drop an
+> executable `~/.claude/focus-tty.sh` taking a `<tty>` arg; it takes precedence over
+> the bundled default. *(Bundled shim contributed by [@wanshuiyin](https://github.com/wanshuiyin).)*
 
 ## Architecture
 
@@ -120,7 +156,8 @@ core/
   patrol.py           triage classification engine
   codex.py            Codex session parsing
   search.py           cross-platform ripgrep search
-  actions.py          focus / fork / review / close / export
+  terminal.py         per-platform terminal control (macOS iTerm2; degrades elsewhere)
+  actions.py          fork / review / close (session lookup around terminal.py)
   history.py          unified index + full-text rg search
   skills.py           skill directory scan
   memory.py           memory file parsing

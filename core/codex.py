@@ -199,21 +199,32 @@ def extract_codex_session_activity(path: Path | str) -> dict:
     }
 
 
+# Codex transcripts are immutable once written; parsing each one fully (meta +
+# activity scan) dominates list_codex_sessions(). Cache by (path, mtime, size)
+# so a rebuild only re-parses files that changed.
+_codex_cache: dict[str, tuple[int, int, "CodexSession"]] = {}
+
+
 def list_codex_sessions() -> list[CodexSession]:
     if not CODEX_SESSIONS_DIR.exists():
         return []
     sessions: list[CodexSession] = []
     for f in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
-        meta = _parse_session_meta(f)
-        if not meta:
-            continue
         try:
             st = f.stat()
         except Exception:
             continue
+        key = str(f)
+        cached = _codex_cache.get(key)
+        if cached and cached[0] == int(st.st_mtime * 1000) and cached[1] == st.st_size:
+            sessions.append(cached[2])
+            continue
+        meta = _parse_session_meta(f)
+        if not meta:
+            continue
         cwd = meta.get("cwd", "")
         activity = extract_codex_session_activity(f)
-        sessions.append(CodexSession(
+        cs = CodexSession(
             session_id=meta.get("id", f.stem),
             project=cwd,
             project_name=cwd.rsplit("/", 1)[-1] if cwd else f.stem,
@@ -229,7 +240,9 @@ def list_codex_sessions() -> list[CodexSession]:
             skills_used=activity["skills_used"],
             memory_ops=activity["memory_ops"],
             skill_breakdown=activity["skill_breakdown"],
-        ))
+        )
+        _codex_cache[key] = (int(st.st_mtime * 1000), st.st_size, cs)
+        sessions.append(cs)
     sessions.sort(key=lambda s: s.transcript_mtime, reverse=True)
     return sessions
 

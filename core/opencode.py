@@ -2,13 +2,24 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from .sessions import HOME_BASE
 
-OPENCODE_DB = HOME_BASE / ".local/share/opencode/opencode.db"
+
+def _opencode_db() -> Path:
+    """OpenCode SQLite path. XDG-style on POSIX, %LOCALAPPDATA% on Windows."""
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "opencode" / "opencode.db"
+    return HOME_BASE / ".local/share/opencode/opencode.db"
+
+
+OPENCODE_DB = _opencode_db()
 
 
 def _get_conn() -> Optional[sqlite3.Connection]:

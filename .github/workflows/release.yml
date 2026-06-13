@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build self-contained .app
+        run: SELF_CONTAINED=1 ./scripts/build-app.sh
+      - name: Zip app (ditto preserves the signature)
+        run: ditto -c -k --keepParent "dist/Claude Fleet.app" claude-fleet-macos-app.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: claude-fleet-macos-app.zip
+
+  archives:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build source archives
+        run: |
+          git archive --format=tar.gz -o claude-fleet-src.tar.gz HEAD
+          git archive --format=zip   -o claude-fleet-windows.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archives
+          path: |
+            claude-fleet-src.tar.gz
+            claude-fleet-windows.zip
+
+  release:
+    needs: [macos-app, archives]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          body: |
+            ## Claude Fleet ${{ github.ref_name }}
+
+            **Artifacts**
+            - `claude-fleet-macos-app.zip` — double-clickable macOS app (full
+              resume/fork/focus). Unzip, move to /Applications, launch, and approve
+              the "control iTerm2" prompt once.
+            - `claude-fleet-src.tar.gz` — run anywhere (macOS/Linux): extract,
+              `pip install -e .`, `./run.sh`.
+            - `claude-fleet-windows.zip` — same source for Windows: extract,
+              `pip install -e .`, `run.bat`. The dashboard runs; resume/fork show a
+              command to copy & run (native terminal spawning is macOS-only for now).

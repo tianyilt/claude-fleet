@@ -312,9 +312,6 @@
           <button @click="forkWindow(w.pid)"
                   class="text-xs border border-green-200 text-green-600 px-2 py-1 rounded hover:bg-green-50 transition">
             Fork</button>
-          <button @click="exportWindow(w.pid)"
-                  class="text-xs border border-gray-200 text-gray-600 px-2 py-1 rounded hover:bg-gray-100 transition">
-            Export</button>
         </div>
       </div>
     </template>
@@ -521,7 +518,7 @@
             <div class="flex items-center gap-3 text-xs text-gray-400 mt-0.5 flex-wrap">
               <span x-text="s.project_name"></span>
               <span x-show="s.model" class="text-gray-400" x-text="s.model?.split('/').pop()?.split('-').slice(0,3).join('-')"></span>
-              <span x-text="s.first_ts?.slice(0,10) || ''"></span>
+              <span x-text="String(s.first_ts || '').slice(0,10)"></span>
               <span x-text="Math.round(s.transcript_size/1024) + ' KB'"></span>
               <!-- Skill tags -->
               <template x-for="sk in (s.skills_used||[]).slice(0,3)" :key="sk">
@@ -666,13 +663,13 @@ function fleet() {
     async focusWindow(pid) {
       const r = await fetch(`/api/windows/${pid}/focus`, { method: 'POST' });
       const d = await r.json();
-      if (!d.ok) this.toast('Focus failed: ' + (d.error || ''));
+      if (!d.ok) await this.termResult(d, '', 'Focus failed');
     },
 
     async forkWindow(pid) {
       const r = await fetch(`/api/windows/${pid}/fork`, { method: 'POST' });
       const d = await r.json();
-      this.toast(d.ok ? 'Forked → new session (inherits history)' : 'Fork failed: ' + (d.error || ''));
+      await this.termResult(d, 'Forked → new session (inherits history)', 'Fork failed');
     },
 
     async reviewWindow(pid) {
@@ -722,18 +719,17 @@ function fleet() {
       this.toast(d.ok ? 'Closed ' + (d.name || pid) : 'Failed: ' + (d.error || ''));
     },
 
-    async exportWindow(pid) {
-      this.toast('Exporting...');
-      const r = await fetch(`/api/windows/${pid}/export`, { method: 'POST' });
-      const d = await r.json();
-      if (d.ok && d.doc_url) {
-        this.toast('Exported: ' + d.doc_url);
-        window.open(d.doc_url, '_blank');
-      } else if (d.ok) {
-        this.toast('Exported: ' + (d.title || ''));
-      } else {
-        this.toast('Export failed: ' + (d.stderr || d.error || ''));
+    // Shared handler for terminal actions (focus/fork/resume). On non-macOS the
+    // backend returns a fallback_cmd instead of opening a window — copy it to the
+    // clipboard and tell the user to paste it.
+    async termResult(d, okMsg, failLabel) {
+      if (d.ok) { this.toast(okMsg); return; }
+      if (d.fallback_cmd) {
+        try { await navigator.clipboard.writeText(d.fallback_cmd); } catch (e) {}
+        this.toast('Not supported here — command copied, paste & run: ' + d.fallback_cmd);
+        return;
       }
+      this.toast(failLabel + ': ' + (d.error || ''));
     },
 
     async toggleExpand(pid) {
@@ -800,17 +796,13 @@ function fleet() {
     async resumeSession(s) {
       const r = await fetch(`/api/history/${s.session_id}/resume`, { method: 'POST' });
       const d = await r.json();
-      if (d.ok) {
-        this.toast(d.action === 'focused' ? 'Focused existing window' : 'Resumed session');
-      } else {
-        this.toast('Resume failed: ' + (d.error || ''));
-      }
+      await this.termResult(d, d.action === 'focused' ? 'Focused existing window' : 'Resumed session', 'Resume failed');
     },
 
     async forkHistorySession(s) {
       const r = await fetch(`/api/history/${s.session_id}/fork`, { method: 'POST' });
       const d = await r.json();
-      this.toast(d.ok ? 'Forked → new session (inherits history)' : 'Fork failed: ' + (d.error || ''));
+      await this.termResult(d, 'Forked → new session (inherits history)', 'Fork failed');
     },
 
     scrollToSkill(skillName) {

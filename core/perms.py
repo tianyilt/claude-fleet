@@ -1,13 +1,18 @@
 """Tail /tmp/claude-focus.log for live permission events."""
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
-FOCUS_LOG = Path("/tmp/claude-focus.log")
+# focus-tty.sh and the notify hook write to the literal /tmp/claude-focus.log on
+# POSIX; only divert to the platform temp dir where /tmp doesn't exist (Windows).
+FOCUS_LOG = (Path("/tmp/claude-focus.log") if os.name == "posix"
+             else Path(tempfile.gettempdir()) / "claude-focus.log")
 
 # Sample line (from existing notify.sh):
 # 2026-01-01 12:00:00 CST notify: project=my-project tty=/dev/ttys000 msg=Bash 需要授权

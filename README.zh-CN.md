@@ -16,6 +16,33 @@ cd claude-fleet && bash run.sh
 
 首次运行自动建 venv 装依赖，不用管。
 
+## 安装方式
+
+**打包成 macOS app（Mac 上推荐）。** 把 Fleet 打成签名 `.app` 后，它有稳定的代码
+身份，macOS 会把「控制 iTerm2」的自动化授权永久绑定到它上面——resume/fork/focus
+重启后依旧可用（而 `./run.sh` 后台跑的进程一旦终端关闭就可能丢失该权限）：
+
+```bash
+./scripts/build-app.sh --install      # 构建并拷到 /Applications
+```
+
+从 /Applications 启动 *Claude Fleet*，对任意 session 点一次 **Resume**，批准
+**“Claude Fleet”想要控制“iTerm.app”**。需要热重载开发时仍用 `./run.sh`。
+
+**任意平台（Windows / Linux）。** dashboard、历史、搜索、监控都是跨平台的：
+
+```bash
+pip install -e .
+./run.sh        # macOS/Linux
+run.bat         # Windows
+```
+
+打开/聚焦真实终端窗口是 macOS 专属（iTerm2）。在 Windows/Linux 上，resume/fork 会
+把 `claude --resume …` 命令复制到剪贴板，你粘到自己的终端里跑即可。
+
+**Releases。** 打 tag 的发布会产出三种产物：`claude-fleet-macos-app.zip`（可双击的
+app）、`claude-fleet-src.tar.gz`（任意平台）、`claude-fleet-windows.zip`。
+
 ## 解决什么问题
 
 多窗口 vibe coding 的日常痛点：
@@ -85,12 +112,14 @@ Plan 版本历史：一个 session 通常迭代 5-14 次 plan，每次 Write 是
 | Resume | `claude --resume <sid>`，继续原 session |
 | Review | 后台跑 `claude -p` 审查，结论（PASS/FAIL/PARTIAL）显示在卡片上 |
 | Close | SIGTERM |
-| Export | 导出对话文档（带 timeline + plan 历史 + skill/memory 摘要）|
 
-> **Focus 设置（macOS）。** Focus 开箱即用，支持 Terminal.app 和 iTerm2——包括 session 跑在
-> **tmux** 里的情况（自带的 [`scripts/focus-tty.sh`](scripts/focus-tty.sh) 会把进程 tty → 所属终端
-> tab → 切过去）。想换别的终端 / 窗口管理器，放一个可执行的 `~/.claude/focus-tty.sh`（接收一个
-> `<tty>` 参数）即可，它优先于自带默认。
+Windows/Linux 上 dashboard 照常用,但 Fork/Resume 没法开原生窗口——它们会把
+`claude --resume …` 命令复制到剪贴板,你粘到自己的终端里跑。
+
+> **Focus 设置（macOS）。** Focus 开箱即用,支持 Terminal.app 和 iTerm2——包括 session 跑在
+> **tmux** 里(自带的 [`scripts/focus-tty.sh`](scripts/focus-tty.sh) 把进程 tty → 所属终端 tab →
+> 切过去)。想换别的终端/窗口管理器,放一个可执行的 `~/.claude/focus-tty.sh`(接收 `<tty>` 参数)
+> 即可,优先于自带默认。*(自带 shim 由 [@wanshuiyin](https://github.com/wanshuiyin) 贡献。)*
 
 ## 架构
 
@@ -104,7 +133,8 @@ core/
   patrol.py           triage 分类引擎
   codex.py            Codex session 解析
   search.py           ripgrep 跨平台搜索
-  actions.py          focus / fork / review / close / export
+  terminal.py         按平台分派的终端控制（macOS iTerm2；其它平台降级）
+  actions.py          fork / review / close（在 terminal.py 外层做 session 查找）
   history.py          统一索引 + 全文 rg 搜索
   skills.py           skill 目录扫描
   memory.py           memory 文件解析
