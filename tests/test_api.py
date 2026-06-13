@@ -15,66 +15,85 @@ def _win(sid, **kw):
     return types.SimpleNamespace(**base)
 
 
+def _sessions(*items):
+    return lambda **k: {"sessions": list(items)}
+
+
 # ---------- resume ----------
 
 def test_resume_alive_focuses(monkeypatch):
+    monkeypatch.setattr(app_module.history, "list_sessions",
+                        _sessions({"session_id": "sid1", "project": "/p", "platform": "claude"}))
     monkeypatch.setattr(app_module.sessions, "list_windows", lambda: [_win("sid1")])
     monkeypatch.setattr(app_module.terminal, "focus", lambda tty: {"ok": True})
     r = client.post("/api/history/sid1/resume").json()
     assert r["ok"] is True and r["action"] == "focused"
 
 
-def test_resume_dead_spawns(monkeypatch):
+def test_resume_dead_launches(monkeypatch):
     monkeypatch.setattr(app_module.sessions, "list_windows", lambda: [])
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        lambda **k: {"sessions": [{"session_id": "sid2", "project": "/p"}]})
-    monkeypatch.setattr(app_module.terminal, "spawn_window", lambda inner: {"ok": True, "error": None})
+                        _sessions({"session_id": "sid2", "project": "/p", "platform": "claude"}))
+    monkeypatch.setattr(app_module.terminal, "launch_session",
+                        lambda platform, sid, cwd, fork=False: {"ok": True, "action": "resumed",
+                                                                "cwd": cwd, "platform": platform})
     r = client.post("/api/history/sid2/resume").json()
     assert r["ok"] is True and r["action"] == "resumed" and r["cwd"] == "/p"
 
 
-def test_resume_not_in_index(monkeypatch):
+def test_resume_codex_session(monkeypatch):
     monkeypatch.setattr(app_module.sessions, "list_windows", lambda: [])
-    monkeypatch.setattr(app_module.history, "list_sessions", lambda **k: {"sessions": []})
+    monkeypatch.setattr(app_module.history, "list_sessions",
+                        _sessions({"session_id": "cx1", "project": "/p", "platform": "codex"}))
+    seen = {}
+    monkeypatch.setattr(app_module.terminal, "launch_session",
+                        lambda platform, sid, cwd, fork=False: seen.update(platform=platform) or {"ok": True})
+    client.post("/api/history/cx1/resume")
+    assert seen["platform"] == "codex"
+
+
+def test_resume_not_in_index(monkeypatch):
+    monkeypatch.setattr(app_module.history, "list_sessions", _sessions())
     r = client.post("/api/history/nope/resume").json()
     assert r["ok"] is False and "not found" in r["error"]
 
 
-def test_resume_non_mac_returns_fallback(monkeypatch):
+def test_resume_no_launcher_returns_command(monkeypatch):
     monkeypatch.setattr(app_module.sessions, "list_windows", lambda: [])
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        lambda **k: {"sessions": [{"session_id": "sid3", "project": "/p"}]})
-    monkeypatch.setattr(app_module.terminal, "spawn_window",
-                        lambda inner: {"ok": False, "unsupported": True,
-                                       "fallback_cmd": inner, "error": "only on macOS"})
+                        _sessions({"session_id": "sid3", "project": "/p", "platform": "claude"}))
+    monkeypatch.setattr(app_module.terminal, "launch_session",
+                        lambda platform, sid, cwd, fork=False: {
+                            "ok": False, "command": f"cd {cwd} && claude --resume {sid}", "error": "no launcher"})
     r = client.post("/api/history/sid3/resume").json()
-    assert r["ok"] is False
-    assert r["fallback_cmd"].startswith("cd /p &&")
+    assert r["ok"] is False and r["command"].startswith("cd /p &&")
 
 
 # ---------- fork ----------
 
 def test_fork_found(monkeypatch):
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        lambda **k: {"sessions": [{"session_id": "sid4", "project": "/q"}]})
-    monkeypatch.setattr(app_module.terminal, "spawn_window", lambda inner: {"ok": True, "error": None})
+                        _sessions({"session_id": "sid4", "project": "/q", "platform": "claude"}))
+    monkeypatch.setattr(app_module.terminal, "launch_session",
+                        lambda platform, sid, cwd, fork=False: {"ok": True, "action": "forked"})
     r = client.post("/api/history/sid4/fork").json()
     assert r["ok"] is True and r["action"] == "forked"
 
 
 def test_fork_not_in_index(monkeypatch):
-    monkeypatch.setattr(app_module.history, "list_sessions", lambda **k: {"sessions": []})
+    monkeypatch.setattr(app_module.history, "list_sessions", _sessions())
     r = client.post("/api/history/nope/fork").json()
     assert r["ok"] is False and "not found" in r["error"]
 
 
-def test_fork_non_mac_fallback(monkeypatch):
+def test_fork_no_launcher_returns_command(monkeypatch):
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        lambda **k: {"sessions": [{"session_id": "sid5", "project": "/q"}]})
-    monkeypatch.setattr(app_module.terminal, "spawn_window",
-                        lambda inner: {"ok": False, "fallback_cmd": inner, "error": "x"})
+                        _sessions({"session_id": "sid5", "project": "/q", "platform": "claude"}))
+    monkeypatch.setattr(app_module.terminal, "launch_session",
+                        lambda platform, sid, cwd, fork=False: {
+                            "ok": False, "command": f"cd {cwd} && claude --resume {sid} --fork-session"})
     r = client.post("/api/history/sid5/fork").json()
-    assert r["fallback_cmd"].endswith("--fork-session")
+    assert r["command"].endswith("--fork-session")
 
 
 # ---------- removed feishu export ----------

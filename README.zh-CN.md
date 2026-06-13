@@ -18,16 +18,16 @@ cd claude-fleet && bash run.sh
 
 ## 安装方式
 
-**打包成 macOS app（Mac 上推荐）。** 把 Fleet 打成签名 `.app` 后，它有稳定的代码
-身份，macOS 会把「控制 iTerm2」的自动化授权永久绑定到它上面——resume/fork/focus
-重启后依旧可用（而 `./run.sh` 后台跑的进程一旦终端关闭就可能丢失该权限）：
+**打包成 macOS app（Mac 上推荐）。** 一个签名的、可双击的 `.app`:
 
 ```bash
 ./scripts/build-app.sh --install      # 构建并拷到 /Applications
 ```
 
-从 /Applications 启动 *Claude Fleet*，对任意 session 点一次 **Resume**，批准
-**“Claude Fleet”想要控制“iTerm.app”**。需要热重载开发时仍用 `./run.sh`。
+Resume/Fork 通过 `open -a`(LaunchServices)开新终端 —— **不需要自动化授权**,重启后
+也照常工作。**Focus**(把拥有该 session 的 tab 切到前台)用的是 AppleScript,第一次用时
+批准 **“Claude Fleet”想要控制“iTerm.app”** 即可,签名 app 让这个授权长期生效。需要热
+重载开发时用 `./run.sh`。
 
 **任意平台（Windows / Linux）。** dashboard、历史、搜索、监控都是跨平台的：
 
@@ -37,8 +37,10 @@ pip install -e .
 run.bat         # Windows
 ```
 
-打开/聚焦真实终端窗口是 macOS 专属（iTerm2）。在 Windows/Linux 上，resume/fork 会
-把 `claude --resume …` 命令复制到剪贴板，你粘到自己的终端里跑即可。
+Resume/Fork 在 macOS(`open -a`)和 Linux(gnome-terminal / konsole / kitty /
+wezterm / xterm…,可用 `CLAUDE_FLEET_TERMINAL_CMD` 指定)都能开真实终端,**Claude 和
+Codex** 会话都支持。Windows(或任何没有已知启动器的环境)上则把 `claude --resume …`
+命令复制到剪贴板,你粘到自己终端里跑。**Focus 仅 macOS。**
 
 **Releases。** 打 tag 的发布会产出三种产物：`claude-fleet-macos-app.zip`（可双击的
 app）、`claude-fleet-src.tar.gz`（任意平台）、`claude-fleet-windows.zip`。
@@ -113,8 +115,8 @@ Plan 版本历史：一个 session 通常迭代 5-14 次 plan，每次 Write 是
 | Review | 后台跑 `claude -p` 审查，结论（PASS/FAIL/PARTIAL）显示在卡片上 |
 | Close | SIGTERM |
 
-Windows/Linux 上 dashboard 照常用,但 Fork/Resume 没法开原生窗口——它们会把
-`claude --resume …` 命令复制到剪贴板,你粘到自己的终端里跑。
+Fork/Resume 在 macOS 和 Linux 上都能开真实终端(Claude 和 Codex 会话都支持);Windows
+或没有已知启动器的环境则把命令复制到剪贴板。Focus 仅 macOS。
 
 > **Focus 设置（macOS）。** Focus 开箱即用,支持 Terminal.app 和 iTerm2——包括 session 跑在
 > **tmux** 里(自带的 [`scripts/focus-tty.sh`](scripts/focus-tty.sh) 把进程 tty → 所属终端 tab →

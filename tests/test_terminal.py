@@ -34,63 +34,49 @@ def test_automation_hint_other_passes_through():
     assert terminal.automation_hint("some other error") == "some other error"
 
 
-# ---------- spawn_window ----------
+# ---------- launch_session (cross-platform launcher, PR #5) ----------
 
-def test_spawn_window_non_mac_returns_fallback(monkeypatch):
-    monkeypatch.setattr(terminal, "IS_MAC", False)
+def test_session_cli_command_claude():
+    assert terminal.session_cli_command("claude", "sid-123", "/tmp/project") == \
+        "cd /tmp/project && claude --resume sid-123"
+    assert terminal.session_cli_command("claude", "sid-123", "/tmp/project", fork=True) == \
+        "cd /tmp/project && claude --resume sid-123 --fork-session"
 
-    def boom(*a, **k):
-        raise AssertionError("osascript must not be called off macOS")
 
-    monkeypatch.setattr(terminal.subprocess, "run", boom)
-    r = terminal.spawn_window("cd /x && claude --resume y")
+def test_session_cli_command_codex():
+    assert terminal.session_cli_command("codex", "sid-123", "/tmp/project") == \
+        "cd /tmp/project && codex resume sid-123"
+    assert terminal.session_cli_command("codex", "sid-123", "/tmp/project", fork=True) == \
+        "cd /tmp/project && codex fork sid-123"
+
+
+def test_session_cli_command_quotes_cwd():
+    cmd = terminal.session_cli_command("claude", "sid", "/tmp/has space")
+    assert "'/tmp/has space'" in cmd
+
+
+def test_launch_no_terminal_returns_command(monkeypatch):
+    monkeypatch.setattr(terminal, "_terminal_command", lambda c, w: None)
+    r = terminal.launch_session("codex", "sid-123", "/tmp/project")
     assert r["ok"] is False
-    assert r["unsupported"] is True
-    assert r["fallback_cmd"] == "cd /x && claude --resume y"
+    assert r["platform"] == "codex"
+    assert r["command"] == "cd /tmp/project && codex resume sid-123"
 
 
-def test_spawn_window_mac_success(monkeypatch):
-    monkeypatch.setattr(terminal, "IS_MAC", True)
-    captured = {}
-
-    def fake_run(args, **k):
-        captured["args"] = args
-        return _FakeProc(returncode=0, stderr="")
-
-    monkeypatch.setattr(terminal.subprocess, "run", fake_run)
-    r = terminal.spawn_window('cd /x && claude --resume "id with spaces"')
-    assert r["ok"] is True
-    assert r["error"] is None
-    assert "fallback_cmd" not in r
-    # the inner command is embedded as an escaped AppleScript string literal
-    script = captured["args"][-1]
-    assert 'write text "cd /x && claude --resume \\"id with spaces\\""' in script
+def test_launch_unsupported_platform():
+    r = terminal.launch_session("opencode", "sid-123", "/tmp/project")
+    assert r["ok"] is False and "cannot be resumed" in r["error"]
 
 
-def test_spawn_window_mac_permission_error(monkeypatch):
-    monkeypatch.setattr(terminal, "IS_MAC", True)
-    monkeypatch.setattr(terminal.subprocess, "run",
-                        lambda *a, **k: _FakeProc(returncode=1, stderr="65:71: syntax error (-2741)"))
-    inner = "cd /x && claude --resume y"
-    r = terminal.spawn_window(inner)
-    assert r["ok"] is False
-    assert "Automation" in r["error"]
-    assert r["fallback_cmd"] == inner
-
-
-def test_spawn_window_then_cmd_two_writes(monkeypatch):
-    monkeypatch.setattr(terminal, "IS_MAC", True)
-    captured = {}
-
-    def fake_run(args, **k):
-        captured["args"] = args
-        return _FakeProc(returncode=0)
-
-    monkeypatch.setattr(terminal.subprocess, "run", fake_run)
-    terminal.spawn_window("resume", then_cmd="review", then_delay=3)
-    script = captured["args"][-1]
-    assert "delay 3" in script
-    assert script.count("write text") == 2
+def test_launch_success_spawns_detached(monkeypatch):
+    monkeypatch.setattr(terminal, "_terminal_command", lambda c, w: ["echo", c])
+    calls = {}
+    monkeypatch.setattr(terminal.subprocess, "Popen",
+                        lambda *a, **k: calls.setdefault("spawned", True))
+    r = terminal.launch_session("claude", "sid-123", "/tmp/project", fork=True)
+    assert r["ok"] is True and r["action"] == "forked"
+    assert r["command"].endswith("--fork-session")
+    assert calls.get("spawned") is True
 
 
 # ---------- focus ----------

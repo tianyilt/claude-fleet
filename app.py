@@ -6,6 +6,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -248,45 +249,43 @@ def api_history_timeline(session_id: str, limit: int = 2000) -> dict:
     raise HTTPException(404, "transcript not found")
 
 
-def _find_history_cwd(session_id: str) -> tuple[bool, str]:
-    """Return (found, cwd) for a session_id from the history index."""
+def _find_history_session(session_id: str) -> Optional[dict]:
+    """Return the indexed session dict for a session_id, or None."""
     data = history.list_sessions(limit=9999)
     for s in data["sessions"]:
         if s["session_id"] == session_id:
-            return True, (s.get("project") or str(Path.home()))
-    return False, ""
+            return s
+    return None
 
 
 @app.post("/api/history/{session_id}/resume")
 def api_history_resume(session_id: str) -> dict:
-    import shlex
-    # If the session is alive, focus it instead of opening a new window.
-    for w in sessions.list_windows():
-        if w.session_id == session_id and w.alive and w.tty:
-            result = terminal.focus(w.tty)
-            return {"ok": result.get("ok", False), "action": "focused",
-                    "session_id": session_id, "pid": w.pid, "error": result.get("error"),
-                    "fallback_cmd": result.get("fallback_cmd")}
-
-    found, cwd = _find_history_cwd(session_id)
-    if not found:
+    sess = _find_history_session(session_id)
+    if not sess:
         return {"ok": False, "error": "session not found in index"}
-    inner = f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(session_id)}"
-    result = terminal.spawn_window(inner)
-    return {"ok": result["ok"], "action": "resumed", "session_id": session_id,
-            "cwd": cwd, "error": result.get("error"), "fallback_cmd": result.get("fallback_cmd")}
+    platform = sess.get("platform", "claude")
+    cwd = sess.get("project") or str(Path.home())
+    # If a live Claude session owns a tty, focus it instead of opening a duplicate.
+    if platform == "claude":
+        for w in sessions.list_windows():
+            if w.session_id == session_id and w.alive and w.tty:
+                result = terminal.focus(w.tty)
+                if result.get("ok"):
+                    return {"ok": True, "action": "focused",
+                            "session_id": session_id, "pid": w.pid}
+                # focus failed (e.g. permission) — fall through to opening a window
+                break
+    return terminal.launch_session(platform, session_id, cwd, fork=False)
 
 
 @app.post("/api/history/{session_id}/fork")
 def api_history_fork(session_id: str) -> dict:
-    import shlex
-    found, cwd = _find_history_cwd(session_id)
-    if not found:
+    sess = _find_history_session(session_id)
+    if not sess:
         return {"ok": False, "error": "session not found in index"}
-    inner = f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(session_id)} --fork-session"
-    result = terminal.spawn_window(inner)
-    return {"ok": result["ok"], "action": "forked", "session_id": session_id,
-            "cwd": cwd, "error": result.get("error"), "fallback_cmd": result.get("fallback_cmd")}
+    platform = sess.get("platform", "claude")
+    cwd = sess.get("project") or str(Path.home())
+    return terminal.launch_session(platform, session_id, cwd, fork=True)
 
 
 @app.get("/api/skills/{name}/sessions")

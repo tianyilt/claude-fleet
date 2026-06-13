@@ -719,14 +719,15 @@ function fleet() {
       this.toast(d.ok ? 'Closed ' + (d.name || pid) : 'Failed: ' + (d.error || ''));
     },
 
-    // Shared handler for terminal actions (focus/fork/resume). On non-macOS the
-    // backend returns a fallback_cmd instead of opening a window — copy it to the
-    // clipboard and tell the user to paste it.
+    // Shared handler for terminal launch actions (fork/resume). When the backend
+    // couldn't open a window, it returns the `command` to run manually — copy it
+    // to the clipboard and tell the user.
     async termResult(d, okMsg, failLabel) {
       if (d.ok) { this.toast(okMsg); return; }
-      if (d.fallback_cmd) {
-        try { await navigator.clipboard.writeText(d.fallback_cmd); } catch (e) {}
-        this.toast('Not supported here — command copied, paste & run: ' + d.fallback_cmd);
+      if (d.command) {
+        let suffix = ': ' + d.command;
+        try { await navigator.clipboard.writeText(d.command); suffix = ' (command copied to clipboard)'; } catch (e) {}
+        this.toast(failLabel + ': ' + (d.error || '') + suffix);
         return;
       }
       this.toast(failLabel + ': ' + (d.error || ''));

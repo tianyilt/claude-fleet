@@ -9,17 +9,11 @@ import os
 import signal
 import shlex
 import subprocess
-import sys
-import tempfile
 import threading
-from pathlib import Path
-from typing import Optional
 
 from . import terminal
 from .sessions import find_window
 from .transcripts import timeline
-
-_TMP = Path(tempfile.gettempdir())
 
 
 def focus_terminal(tty: str) -> dict:
@@ -28,19 +22,11 @@ def focus_terminal(tty: str) -> dict:
 
 
 def fork_session(pid: int) -> dict:
-    """Open a new terminal window and fork the session (new ID, inherits history)."""
+    """Open a terminal and fork the live session (new ID, inherits history)."""
     w = find_window(pid)
     if not w:
         return {"ok": False, "error": f"no window pid={pid}"}
-    inner = f"cd {shlex.quote(w.cwd)} && claude --resume {shlex.quote(w.session_id)} --fork-session"
-    result = terminal.spawn_window(inner)
-    return {
-        "ok": result["ok"],
-        "cwd": w.cwd,
-        "session_id": w.session_id,
-        "error": result.get("error"),
-        "fallback_cmd": result.get("fallback_cmd"),
-    }
+    return terminal.launch_session("claude", w.session_id, w.cwd, fork=True)
 
 
 def close_session(pid: int) -> dict:
@@ -150,20 +136,9 @@ def review_session_result(pid: int) -> dict:
     return _review_results.get(pid, {"status": "not_found"})
 
 
-_REVIEW_PROMPT = "请 review 你刚才做的工作，检查是否有低级错误、遗漏、安全问题。列出发现的问题和修复建议。"
-
-
 def review_session(pid: int) -> dict:
-    """Open a new terminal window, resume the session, and send a review prompt."""
+    """Open a terminal and resume the session for manual review."""
     w = find_window(pid)
     if not w:
         return {"ok": False, "error": f"no window pid={pid}"}
-    resume_cmd = f"cd {shlex.quote(w.cwd)} && claude --resume {shlex.quote(w.session_id)}"
-    result = terminal.spawn_window(resume_cmd, then_cmd=_REVIEW_PROMPT, then_delay=3)
-    return {
-        "ok": result["ok"],
-        "pid": pid,
-        "session_id": w.session_id,
-        "error": result.get("error"),
-        "fallback_cmd": result.get("fallback_cmd"),
-    }
+    return terminal.launch_session("claude", w.session_id, w.cwd, fork=False)

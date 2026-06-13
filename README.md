@@ -20,19 +20,17 @@ The first run creates a venv and installs dependencies automatically — nothing
 
 ## Install options
 
-**Run as a macOS app (recommended on Mac).** Packaging Fleet as a signed `.app`
-gives it a stable code identity, so macOS binds the "control iTerm2" Automation
-grant to it permanently — resume/fork/focus keep working even across restarts
-(a plain `./run.sh` backgrounded process can lose that permission once its
-terminal closes):
+**Run as a macOS app (recommended on Mac).** A signed, double-clickable `.app`:
 
 ```bash
 ./scripts/build-app.sh --install      # builds + copies to /Applications
 ```
 
-Launch *Claude Fleet* from /Applications, click **Resume** on any session once,
-and approve **“Claude Fleet” wants to control “iTerm.app”**. For development with
-hot-reload, keep using `./run.sh`.
+Resume/Fork open a new terminal via `open -a` (LaunchServices) — no Automation
+permission needed, so they work even after a restart. **Focus** (raising the tab
+that owns a session) does use AppleScript; the first time you use it, approve
+**“Claude Fleet” wants to control “iTerm.app”** — the signed app makes that grant
+stick. For development with hot-reload, use `./run.sh`.
 
 **Run anywhere (Windows / Linux).** The dashboard, history, search and monitoring
 are cross-platform:
@@ -43,9 +41,11 @@ pip install -e .
 run.bat         # Windows
 ```
 
-Opening/focusing a real terminal window is macOS-only (iTerm2). On Windows/Linux,
-resume/fork instead copy the `claude --resume …` command to your clipboard for you
-to paste into your own terminal.
+Resume/Fork open a real terminal on macOS (`open -a`) and Linux (gnome-terminal /
+konsole / kitty / wezterm / xterm …; set `CLAUDE_FLEET_TERMINAL_CMD` to force one),
+for both **Claude and Codex** sessions. On Windows (or any host without a known
+launcher) they copy the `claude --resume …` command to your clipboard to paste
+into your own terminal. **Focus** is macOS-only.
 
 **Releases.** Tagged releases ship three artifacts: `claude-fleet-macos-app.zip`
 (double-clickable app), `claude-fleet-src.tar.gz` (run anywhere), and
@@ -132,9 +132,9 @@ Write is a full snapshot, each Edit is a red/green diff.
 | Review | run `claude -p` review in the background; the verdict (PASS/FAIL/PARTIAL) shows on the card |
 | Close | SIGTERM |
 
-On Windows/Linux the dashboard still works, but Fork/Resume can't open a native
-window — they copy the `claude --resume …` command to your clipboard to paste into
-your own terminal.
+Fork/Resume open a real terminal on macOS and Linux (Claude *and* Codex sessions);
+on Windows or any host with no known launcher they copy the command to your
+clipboard instead. Focus is macOS-only.
 
 > **Focus setup (macOS).** Focus works out of the box on Terminal.app and iTerm2 —
 > including when your sessions run inside **tmux** — via the bundled
