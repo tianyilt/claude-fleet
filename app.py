@@ -288,6 +288,20 @@ def api_history_fork(session_id: str) -> dict:
     return terminal.launch_session(platform, session_id, cwd, fork=True)
 
 
+@app.post("/api/history/{session_id}/fork-at-node")
+def api_history_fork_at_node(session_id: str, uuid: str = "") -> dict:
+    """Fork a Claude session truncated at a timeline node (issue #3)."""
+    if not uuid:
+        return {"ok": False, "error": "missing node uuid"}
+    sess = _find_history_session(session_id)
+    if not sess:
+        return {"ok": False, "error": "session not found in index"}
+    if sess.get("platform", "claude") != "claude":
+        return {"ok": False, "error": "fork-at-node is only supported for Claude sessions"}
+    cwd = sess.get("project") or str(Path.home())
+    return actions.fork_session_at_node(session_id, uuid, cwd)
+
+
 @app.get("/api/skills/{name}/sessions")
 def api_skill_sessions(name: str) -> dict:
     """Reverse lookup: which sessions touched this skill, with per-session counts."""

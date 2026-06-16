@@ -458,6 +458,10 @@
                     class="font-medium"
                     x-text="ev.kind==='tool_use' ? ev.tool : ev.kind.replace('_text','').replace('tool_result','result')"></span>
             </template>
+            <button x-show="ev.uuid && (!timelineData?.platform || timelineData.platform==='claude')"
+                    @click.stop="forkFromEvent(ev.uuid)"
+                    class="ml-auto shrink-0 text-[10px] border border-green-200 text-green-600 px-1.5 rounded hover:bg-green-50"
+                    title="Fork a new session truncated at this point">⑂ fork</button>
           </div>
           <!-- Skill args -->
           <template x-if="ev.kind === 'skill_invoke'">
@@ -804,6 +808,15 @@ function fleet() {
       const r = await fetch(`/api/history/${s.session_id}/fork`, { method: 'POST' });
       const d = await r.json();
       await this.termResult(d, 'Forked → new session (inherits history)', 'Fork failed');
+    },
+
+    async forkFromEvent(uuid) {
+      const sid = this.timelineData?.session_id;
+      if (!sid || !uuid) { this.toast('No session/node to fork'); return; }
+      if (!confirm('Fork a new session truncated at this point in the conversation?')) return;
+      const r = await fetch(`/api/history/${sid}/fork-at-node?uuid=${encodeURIComponent(uuid)}`, { method: 'POST' });
+      const d = await r.json();
+      await this.termResult(d, 'Forked at this node → new session', 'Fork-at-node failed');
     },
 
     scrollToSkill(skillName) {

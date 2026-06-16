@@ -29,6 +29,25 @@ def fork_session(pid: int) -> dict:
     return terminal.launch_session("claude", w.session_id, w.cwd, fork=True)
 
 
+def fork_session_at_node(session_id: str, target_uuid: str, cwd: str) -> dict:
+    """Fork a Claude session truncated at a timeline node (issue #3).
+
+    Writes a new transcript ending at `target_uuid`, then resumes it — so the new
+    session continues from that point with the prior history but none of the later
+    turns.
+    """
+    from .transcripts import fork_transcript_at
+    try:
+        new_sid, _ = fork_transcript_at(session_id, target_uuid)
+    except (FileNotFoundError, ValueError) as e:
+        return {"ok": False, "error": str(e)}
+    # The new transcript already exists on disk, so resume it directly (no --fork-session).
+    result = terminal.launch_session("claude", new_sid, cwd, fork=False)
+    result["new_session_id"] = new_sid
+    result["forked_from"] = session_id
+    return result
+
+
 def close_session(pid: int) -> dict:
     """Send SIGTERM to a Claude Code session for graceful shutdown."""
     w = find_window(pid)

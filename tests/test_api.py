@@ -96,6 +96,29 @@ def test_fork_no_launcher_returns_command(monkeypatch):
     assert r["command"].endswith("--fork-session")
 
 
+# ---------- fork-at-node (#3) ----------
+
+def test_fork_at_node_requires_uuid():
+    assert client.post("/api/history/sid/fork-at-node").json()["ok"] is False
+
+
+def test_fork_at_node_calls_action(monkeypatch):
+    monkeypatch.setattr(app_module.history, "list_sessions",
+                        _sessions({"session_id": "s6", "project": "/p", "platform": "claude"}))
+    seen = {}
+    monkeypatch.setattr(app_module.actions, "fork_session_at_node",
+                        lambda sid, uuid, cwd: seen.update(sid=sid, uuid=uuid, cwd=cwd) or {"ok": True})
+    r = client.post("/api/history/s6/fork-at-node?uuid=u9").json()
+    assert r["ok"] is True and seen == {"sid": "s6", "uuid": "u9", "cwd": "/p"}
+
+
+def test_fork_at_node_rejects_non_claude(monkeypatch):
+    monkeypatch.setattr(app_module.history, "list_sessions",
+                        _sessions({"session_id": "cx", "project": "/p", "platform": "codex"}))
+    r = client.post("/api/history/cx/fork-at-node?uuid=u1").json()
+    assert r["ok"] is False and "Claude" in r["error"]
+
+
 # ---------- removed feishu export ----------
 
 def test_export_endpoint_removed():
