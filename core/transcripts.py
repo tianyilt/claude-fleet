@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import uuid as _uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
+
+from .sessions import PROJECTS_DIR
 
 
 @dataclass
@@ -16,6 +19,7 @@ class TurnEvent:
     tool: Optional[str]  # name of tool when kind == tool_use
     role: str            # user | assistant | system
     extra: dict          # small structured payload (e.g. tool input keys)
+    uuid: str = ""       # source JSONL line uuid (for fork-at-node); "" if unknown
 
 
 def _iter_lines(path: Path) -> Iterable[dict]:
@@ -121,16 +125,71 @@ def _normalize(d: dict) -> list[TurnEvent]:
     if msg and "timestamp" not in msg and d.get("timestamp"):
         msg["timestamp"] = d.get("timestamp")
     if t == "assistant":
-        return _flatten_assistant(msg)
-    if t == "user":
-        return _flatten_user(msg)
-    if t in {"system", "permission-mode"}:
-        return [TurnEvent(
+        events = _flatten_assistant(msg)
+    elif t == "user":
+        events = _flatten_user(msg)
+    elif t in {"system", "permission-mode"}:
+        events = [TurnEvent(
             d.get("timestamp", ""), "system",
             t + (": " + str(d.get("permissionMode", "")) if d.get("permissionMode") else ""),
             None, "system", {}
         )]
-    return []
+    else:
+        return []
+    # Tie every event back to its source JSONL line so the UI can fork at this node.
+    src_uuid = d.get("uuid", "") or ""
+    for ev in events:
+        ev.uuid = src_uuid
+    return events
+
+
+def find_transcript_path(session_id: str) -> Optional[Path]:
+    """Locate ~/.claude/projects/<slug>/<session_id>.jsonl by scanning project dirs."""
+    if not PROJECTS_DIR.exists():
+        return None
+    for proj in PROJECTS_DIR.iterdir():
+        if not proj.is_dir():
+            continue
+        f = proj / f"{session_id}.jsonl"
+        if f.exists():
+            return f
+    return None
+
+
+def fork_transcript_at(session_id: str, target_uuid: str) -> tuple[str, str]:
+    """Copy a transcript up to (and including) the line with `target_uuid`, rewriting
+    every line's sessionId to a fresh id. Returns (new_session_id, new_path).
+
+    Resuming the new id (`claude --resume <new_sid>`) continues from that node.
+    Raises FileNotFoundError if the session has no transcript, ValueError if the
+    uuid isn't present.
+    """
+    original = find_transcript_path(session_id)
+    if original is None:
+        raise FileNotFoundError(f"no transcript for session {session_id}")
+    new_sid = str(_uuid.uuid4())
+    new_path = original.parent / f"{new_sid}.jsonl"
+    found = False
+    with original.open() as src, new_path.open("w") as dst:
+        for line in src:
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                obj = json.loads(s)
+            except Exception:
+                dst.write(line if line.endswith("\n") else line + "\n")
+                continue
+            if obj.get("sessionId"):
+                obj["sessionId"] = new_sid
+            dst.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            if obj.get("uuid") == target_uuid:
+                found = True
+                break
+    if not found:
+        new_path.unlink(missing_ok=True)
+        raise ValueError(f"uuid {target_uuid} not found in transcript {session_id}")
+    return new_sid, str(new_path)
 
 
 def timeline(path: str | Path, limit: int = 50) -> list[dict]:
