@@ -472,6 +472,7 @@ def extract_plan_history(path: str | Path) -> list[dict]:
                     "version_label": f"v{vn}",
                     "content": inp.get("content", ""),
                     "diff": None,
+                    "uuid": d.get("uuid", ""),  # source line → jump / fork-at-node
                 })
             elif tool_name == "Edit":
                 vn = write_count.get(plan_name, 0)
@@ -486,5 +487,6 @@ def extract_plan_history(path: str | Path) -> list[dict]:
                     "version_label": f"v{vn}.{en}",
                     "content": None,
                     "diff": {"old": old_s[:2000], "new": new_s[:2000]},
+                    "uuid": d.get("uuid", ""),  # source line → jump / fork-at-node
                 })
     return history

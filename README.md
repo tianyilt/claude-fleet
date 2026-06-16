@@ -120,7 +120,32 @@ memory reads are dashed blue, memory writes are pink.
 Plan version history: a session typically iterates on its plan 5–14 times — each
 Write is a full snapshot, each Edit is a red/green diff.
 
+Every event has a **⑂ fork** button, and the header has a **Share** button (below).
+
 ![](docs/screenshot-timeline.png)
+
+### Fork from any node
+
+Don't just resume the latest state — branch from *any* point in a long
+conversation. Click **⑂ fork** on a timeline event and Claude Fleet copies the
+transcript truncated at that node into a new session (rewriting the session id)
+and resumes it, so you continue from there with the earlier history but none of
+the later turns. *(Requested in [#3](https://github.com/tianyilt/claude-fleet/issues/3).)*
+
+For long sessions, you don't have to scroll to find the right node: the **Plan
+history** panel anchors to each plan version — **↳ jump** scrolls the timeline to
+where that plan was written, and **⑂ fork (done)** branches from the point where
+that version *finished executing* (right before the next plan revision). So
+"fork from where plan v3 was done" is one click.
+
+### Share a session as a read-only web page
+
+Click **Share** to render a self-contained, CDN-free HTML page of the whole
+timeline, served at `/share/<id>` — drop it in a wiki / Feishu doc / PR. Optional
+one-click redaction masks emails, API keys, tokens and home-dir usernames so it's
+safe to post publicly. *(Requested in [#4](https://github.com/tianyilt/claude-fleet/issues/4).)*
+
+![](docs/screenshot-share.png)
 
 ### Actions
 
@@ -128,8 +153,10 @@ Write is a full snapshot, each Edit is a red/green diff.
 |--------|--------------|
 | Focus | jump to that terminal tab |
 | Fork | `claude --resume <sid> --fork-session` — new session inherits the history |
+| ⑂ fork (per event) | branch a new session truncated at that timeline node |
 | Resume | `claude --resume <sid>` — continue the original session |
 | Review | run `claude -p` review in the background; the verdict (PASS/FAIL/PARTIAL) shows on the card |
+| Share | export a read-only HTML page of the session (optional redaction) |
 | Close | SIGTERM |
 
 Fork/Resume open a real terminal on macOS and Linux (Claude *and* Codex sessions);

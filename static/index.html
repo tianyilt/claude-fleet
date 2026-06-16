@@ -383,7 +383,16 @@
                       x-text="ph.operation"></span>
                 <span class="text-xs text-gray-400" x-text="ph.plan_file"></span>
               </div>
-              <span class="text-gray-400 text-xs" x-text="ph._expanded ? '▼' : '▶'"></span>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <button x-show="ph.uuid" @click.stop="scrollToPlanEvent(ph.uuid)"
+                        class="text-[10px] border border-blue-200 text-blue-600 px-1.5 py-0.5 rounded hover:bg-blue-50"
+                        title="跳到时间线里这一版 plan 写入处">↳ jump</button>
+                <button x-show="ph.uuid && (!timelineData?.platform || timelineData.platform==='claude')"
+                        @click.stop="forkAfterPlan(ph)"
+                        class="text-[10px] border border-green-200 text-green-600 px-1.5 py-0.5 rounded hover:bg-green-50"
+                        title="从这一版 plan 执行完处 fork 出新会话">⑂ fork (done)</button>
+                <span class="text-gray-400 text-xs" x-text="ph._expanded ? '▼' : '▶'"></span>
+              </div>
             </div>
             <div x-show="ph._expanded" class="px-3 pb-3 border-t border-purple-100" x-transition>
               <template x-if="ph.operation === 'write' && ph.content">
@@ -833,6 +842,35 @@ function fleet() {
       const r = await fetch(`/api/history/${sid}/fork-at-node?uuid=${encodeURIComponent(uuid)}`, { method: 'POST' });
       const d = await r.json();
       await this.termResult(d, 'Forked at this node → new session', 'Fork-at-node failed');
+    },
+
+    // Jump the timeline to the event whose source line == uuid (the plan write).
+    scrollToPlanEvent(uuid) {
+      const events = this.timelineData?.events || [];
+      const idx = events.findIndex(e => e.uuid === uuid);
+      if (idx < 0) { this.toast('该 plan 节点不在已加载的时间线范围内'); return; }
+      const el = document.getElementById('tl-ev-' + idx);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('bg-purple-50');
+      setTimeout(() => el.classList.remove('bg-purple-50'), 2000);
+    },
+
+    // Fork at the point where this plan version *finished executing* — i.e. the
+    // last event before the next plan version was written (or the session end
+    // for the latest version), then reuse the node-fork endpoint.
+    forkAfterPlan(ph) {
+      const events = this.timelineData?.events || [];
+      const vIdx = events.findIndex(e => e.uuid === ph.uuid);
+      if (vIdx < 0) { this.toast('该 plan 节点不在已加载的时间线范围内,请到时间线里手动 fork'); return; }
+      const planUuids = new Set((this.timelineData?.plan_history || []).map(p => p.uuid).filter(Boolean));
+      let nextIdx = -1;
+      for (let i = vIdx + 1; i < events.length; i++) {
+        if (planUuids.has(events[i].uuid)) { nextIdx = i; break; }
+      }
+      const target = nextIdx > 0 ? events[nextIdx - 1].uuid : events[events.length - 1].uuid;
+      if (!target) { this.toast('找不到可 fork 的节点'); return; }
+      this.forkFromEvent(target);
     },
 
     scrollToSkill(skillName) {

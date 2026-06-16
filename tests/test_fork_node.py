@@ -47,3 +47,20 @@ def test_fork_transcript_at_no_transcript_raises(monkeypatch):
     monkeypatch.setattr(transcripts, "find_transcript_path", lambda sid: None)
     with pytest.raises(FileNotFoundError):
         transcripts.fork_transcript_at("ghost", "u1")
+
+
+def test_extract_plan_history_carries_source_uuid(tmp_path):
+    """Plan versions must carry the source line uuid so the Plan panel can
+    jump / fork at that node (the navigation feature)."""
+    f = tmp_path / "s.jsonl"
+    f.write_text(json.dumps({
+        "type": "assistant", "uuid": "plan-uuid-1", "timestamp": "2026-06-16T00:00:00Z",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Write",
+             "input": {"file_path": "/home/x/.claude/plans/my-plan.md", "content": "# step 1"}},
+        ]},
+    }) + "\n")
+    hist = transcripts.extract_plan_history(str(f))
+    assert len(hist) == 1
+    assert hist[0]["version_label"] == "v1"
+    assert hist[0]["uuid"] == "plan-uuid-1"

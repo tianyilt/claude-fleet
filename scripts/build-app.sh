@@ -85,7 +85,10 @@ if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/"; then open "http:
 trap 'kill 0' EXIT
 # Run uvicorn as a CHILD (no exec): this bash process stays alive as the app, so
 # macOS keeps attributing the children's Apple Events to Claude Fleet.app.
-"$VENV/bin/python" -m uvicorn app:app --host 127.0.0.1 --port "$PORT"
+# --reload picks up edits to app.py/core/* without a manual restart (the
+# reloader stays a child of this bash launcher, so the Apple Events identity
+# above is preserved).
+"$VENV/bin/python" -m uvicorn app:app --host 127.0.0.1 --port "$PORT" --reload
 LAUNCHER
 else
     # local mode: bake this repo path + use its .venv
@@ -105,7 +108,10 @@ fi
 trap 'kill 0' EXIT
 # Run uvicorn as a CHILD (no exec): this bash process stays alive as the app, so
 # macOS keeps attributing the children's Apple Events to Claude Fleet.app.
-"\$REPO/.venv/bin/python" -m uvicorn app:app --host 127.0.0.1 --port "\$PORT"
+# --reload picks up edits to app.py/core/* without a manual restart (the
+# reloader stays a child of this bash launcher, so the Apple Events identity
+# above is preserved).
+"\$REPO/.venv/bin/python" -m uvicorn app:app --host 127.0.0.1 --port "\$PORT" --reload
 LAUNCHER
 fi
 chmod +x "$APP/Contents/MacOS/claude-fleet"

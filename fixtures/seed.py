@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -246,6 +247,10 @@ HISTORY_ONLY = [
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Give every line a uuid so the timeline's per-event "⑂ fork" button renders
+    # (it only shows when ev.uuid is present), mirroring real Claude transcripts.
+    for r in rows:
+        r.setdefault("uuid", uuid.uuid4().hex)
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
 

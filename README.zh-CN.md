@@ -103,7 +103,28 @@ Memory 面板按 type 分组（user/feedback/project/reference），每条显示
 
 Plan 版本历史：一个 session 通常迭代 5-14 次 plan，每次 Write 是完整快照，Edit 是红绿 diff。
 
+每条 event 右侧都有 **⑂ fork** 按钮,面板右上角有 **Share** 按钮(见下)。
+
 ![](docs/screenshot-timeline.png)
+
+### 从任意节点 Fork
+
+不止恢复到最后状态——可以从长对话的**任意一步**分叉。点某条 event 的 **⑂ fork**,
+Claude Fleet 会把 transcript 裁剪到该节点、改写 session id 写成新 session 再 resume,
+于是你带着此前的历史、但去掉之后的对话,从这里继续。*(对应
+[#3](https://github.com/tianyilt/claude-fleet/issues/3)。)*
+
+长 session 不用手动翻找:**Plan 历史**面板锚定到每个 plan 版本——**↳ jump** 滚动到该
+版 plan 写入处,**⑂ fork (done)** 从该版**执行完**那一刻(下一版修订之前)分叉。于是
+"从 plan v3 执行完那点 fork" 一键搞定。
+
+### 把会话分享成只读网页
+
+点 **Share** 渲染一个自包含、无需 CDN 的 HTML 页面(完整 timeline),通过 `/share/<id>`
+访问——可直接放进 wiki / 飞书文档 / PR。可选一键脱敏会把邮箱、API key、token、家目录
+用户名打码,放心公开。*(对应 [#4](https://github.com/tianyilt/claude-fleet/issues/4)。)*
+
+![](docs/screenshot-share.png)
 
 ### 操作
 
@@ -111,8 +132,10 @@ Plan 版本历史：一个 session 通常迭代 5-14 次 plan，每次 Write 是
 |------|--------|
 | Focus | 跳到那个终端 tab |
 | Fork | `claude --resume <sid> --fork-session`，新 session 继承对话历史 |
+| ⑂ fork（每条 event） | 从该 timeline 节点裁剪出新 session 分叉 |
 | Resume | `claude --resume <sid>`，继续原 session |
 | Review | 后台跑 `claude -p` 审查，结论（PASS/FAIL/PARTIAL）显示在卡片上 |
+| Share | 导出只读 HTML 分享页（可选脱敏） |
 | Close | SIGTERM |
 
 Fork/Resume 在 macOS 和 Linux 上都能开真实终端(Claude 和 Codex 会话都支持);Windows
