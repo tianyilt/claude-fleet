@@ -333,6 +333,10 @@
                 class="text-xs border border-purple-200 text-purple-600 px-2 py-1 rounded hover:bg-purple-50 transition"
                 :class="showPlanHistory ? 'bg-purple-50' : ''">
           Plan · <span x-text="timelineData?.plan_history?.length || 0"></span> 版本</button>
+        <button @click="shareSession(timelineData?.session_id)"
+                x-show="timelineData?.session_id"
+                class="text-xs border border-sky-200 text-sky-600 px-2 py-1 rounded hover:bg-sky-50 transition">
+          Share</button>
         <button @click="expandedPid = null; expandedHistoryId = null; timelineData = null; planData = null"
                 class="text-gray-400 hover:text-gray-700 text-lg">&times;</button>
       </div>
@@ -721,6 +725,18 @@ function fleet() {
       const r = await fetch(`/api/windows/${pid}/close`, { method: 'POST' });
       const d = await r.json();
       this.toast(d.ok ? 'Closed ' + (d.name || pid) : 'Failed: ' + (d.error || ''));
+    },
+
+    async shareSession(sid) {
+      if (!sid) { this.toast('No session to share'); return; }
+      const redact = confirm('Redact secrets/PII (emails, keys, tokens, home paths)?\nOK = redacted (safe to share)  ·  Cancel = full content');
+      const r = await fetch(`/api/history/${sid}/share?redact=${redact}`, { method: 'POST' });
+      const d = await r.json();
+      if (!d.ok) { this.toast('Share failed: ' + (d.error || '')); return; }
+      const url = location.origin + d.share_url;
+      try { await navigator.clipboard.writeText(url); this.toast('Share link copied: ' + url); }
+      catch (e) { this.toast('Share page: ' + url); }
+      window.open(d.share_url, '_blank');
     },
 
     // Shared handler for terminal launch actions (fork/resume). When the backend
