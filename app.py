@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from contextlib import asynccontextmanager
@@ -13,10 +14,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from core import actions, codex, history, memory, patrol, perms, plans, search, sessions, skills, terminal, transcripts
+from core import actions, codex, history, memory, patrol, perms, plans, search, sessions, share, skills, terminal, transcripts
 
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
+SHARE_DIR = STATIC_DIR / "share"
 
 
 # ---------- shared in-memory state ----------
@@ -358,6 +360,31 @@ def api_memory_sessions(name: str) -> dict:
         })
     rows.sort(key=lambda r: -r["total"])
     return {"name": name, "sessions": rows, "session_count": len(rows)}
+
+
+@app.post("/api/history/{session_id}/share")
+def api_history_share(session_id: str, redact: bool = True) -> dict:
+    """Render a read-only shareable HTML page for a session (issue #4)."""
+    try:
+        title, page = share.render_session_html(session_id, redact=redact)
+    except FileNotFoundError as e:
+        return {"ok": False, "error": str(e)}
+    # short, non-enumerable id derived from session + redaction mode
+    share_id = hashlib.sha1(f"{session_id}:{redact}".encode()).hexdigest()[:16]
+    SHARE_DIR.mkdir(parents=True, exist_ok=True)
+    (SHARE_DIR / f"{share_id}.html").write_text(page, encoding="utf-8")
+    return {"ok": True, "share_url": f"/share/{share_id}", "title": title, "redacted": redact}
+
+
+@app.get("/share/{share_id}")
+def view_share(share_id: str) -> HTMLResponse:
+    """Serve a previously generated read-only share page."""
+    if not share_id.isalnum():
+        raise HTTPException(404, "not found")
+    f = SHARE_DIR / f"{share_id}.html"
+    if not f.exists():
+        raise HTTPException(404, "share not found")
+    return HTMLResponse(f.read_text(encoding="utf-8"))
 
 
 @app.get("/api/memory/{name}")

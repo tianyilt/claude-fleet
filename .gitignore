@@ -10,6 +10,9 @@ __pycache__/
 dist/
 .pytest_cache/
 
+# generated share pages
+static/share/
+
 # generated demo data + public mirror clone
 fixtures/demo-home/
 .public-mirror/
