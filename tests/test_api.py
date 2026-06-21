@@ -23,7 +23,7 @@ def _sessions(*items):
 
 def test_resume_alive_focuses(monkeypatch):
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        _sessions({"session_id": "sid1", "project": "/p", "platform": "claude"}))
+                        _sessions({"session_id": "sid1", "project": "/tmp", "platform": "claude"}))
     monkeypatch.setattr(app_module.sessions, "list_windows", lambda: [_win("sid1")])
     monkeypatch.setattr(app_module.terminal, "focus", lambda tty: {"ok": True})
     r = client.post("/api/history/sid1/resume").json()
@@ -33,18 +33,18 @@ def test_resume_alive_focuses(monkeypatch):
 def test_resume_dead_launches(monkeypatch):
     monkeypatch.setattr(app_module.sessions, "list_windows", lambda: [])
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        _sessions({"session_id": "sid2", "project": "/p", "platform": "claude"}))
+                        _sessions({"session_id": "sid2", "project": "/tmp", "platform": "claude"}))
     monkeypatch.setattr(app_module.terminal, "launch_session",
                         lambda platform, sid, cwd, fork=False: {"ok": True, "action": "resumed",
                                                                 "cwd": cwd, "platform": platform})
     r = client.post("/api/history/sid2/resume").json()
-    assert r["ok"] is True and r["action"] == "resumed" and r["cwd"] == "/p"
+    assert r["ok"] is True and r["action"] == "resumed" and r["cwd"] == "/tmp"
 
 
 def test_resume_codex_session(monkeypatch):
     monkeypatch.setattr(app_module.sessions, "list_windows", lambda: [])
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        _sessions({"session_id": "cx1", "project": "/p", "platform": "codex"}))
+                        _sessions({"session_id": "cx1", "project": "/tmp", "platform": "codex"}))
     seen = {}
     monkeypatch.setattr(app_module.terminal, "launch_session",
                         lambda platform, sid, cwd, fork=False: seen.update(platform=platform) or {"ok": True})
@@ -61,19 +61,19 @@ def test_resume_not_in_index(monkeypatch):
 def test_resume_no_launcher_returns_command(monkeypatch):
     monkeypatch.setattr(app_module.sessions, "list_windows", lambda: [])
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        _sessions({"session_id": "sid3", "project": "/p", "platform": "claude"}))
+                        _sessions({"session_id": "sid3", "project": "/tmp", "platform": "claude"}))
     monkeypatch.setattr(app_module.terminal, "launch_session",
                         lambda platform, sid, cwd, fork=False: {
                             "ok": False, "command": f"cd {cwd} && claude --resume {sid}", "error": "no launcher"})
     r = client.post("/api/history/sid3/resume").json()
-    assert r["ok"] is False and r["command"].startswith("cd /p &&")
+    assert r["ok"] is False and r["command"].startswith("cd /tmp &&")
 
 
 # ---------- fork ----------
 
 def test_fork_found(monkeypatch):
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        _sessions({"session_id": "sid4", "project": "/q", "platform": "claude"}))
+                        _sessions({"session_id": "sid4", "project": "/tmp", "platform": "claude"}))
     monkeypatch.setattr(app_module.terminal, "launch_session",
                         lambda platform, sid, cwd, fork=False: {"ok": True, "action": "forked"})
     r = client.post("/api/history/sid4/fork").json()
@@ -88,7 +88,7 @@ def test_fork_not_in_index(monkeypatch):
 
 def test_fork_no_launcher_returns_command(monkeypatch):
     monkeypatch.setattr(app_module.history, "list_sessions",
-                        _sessions({"session_id": "sid5", "project": "/q", "platform": "claude"}))
+                        _sessions({"session_id": "sid5", "project": "/tmp", "platform": "claude"}))
     monkeypatch.setattr(app_module.terminal, "launch_session",
                         lambda platform, sid, cwd, fork=False: {
                             "ok": False, "command": f"cd {cwd} && claude --resume {sid} --fork-session"})

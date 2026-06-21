@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional
@@ -35,6 +38,7 @@ class CodexSession:
     skills_used: list = field(default_factory=list)
     memory_ops: list = field(default_factory=list)
     skill_breakdown: dict = field(default_factory=dict)
+    metrics: dict = field(default_factory=dict)
 
     def to_history_dict(self) -> dict:
         return {
@@ -54,6 +58,7 @@ class CodexSession:
             "skills_used": self.skills_used,
             "memory_ops": self.memory_ops,
             "skill_breakdown": self.skill_breakdown,
+            "metrics": self.metrics,
         }
 
 
@@ -69,8 +74,42 @@ def _parse_session_meta(path: Path) -> Optional[dict]:
         return None
 
 
+# Synthetic role=user/developer records Codex injects before the real prompt
+# (sandbox/permission preamble + environment context). Skip them so the title
+# shows the user's actual first message, not the boilerplate or the assistant's
+# reply.
+_SYNTHETIC_PREFIXES = (
+    "<environment_context>",
+    "<permissions instructions>",
+    "<user_instructions>",
+    "<permissions>",
+)
+
+
+def _first_text(content) -> str:
+    """Pull the first non-empty text out of a Codex message content payload."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") in ("input_text", "text", "output_text"):
+                t = (c.get("text") or "").strip()
+                if t:
+                    return t
+    return ""
+
+
 def _extract_first_user_input(path: Path) -> str:
-    """Try user input first, fall back to first assistant response text."""
+    """Return the user's real first prompt.
+
+    The genuine prompt is a `response_item`/`message` with role=="user" carrying
+    `input_text`, but Codex precedes it with synthetic user/developer records
+    (permissions + environment_context). The old code grabbed the first
+    `output_text` instead, which is the *assistant's* opening reply — so every
+    Codex session was mistitled with "我会先…" / "I'll…". Skip the wrappers and
+    take the first real user message; only fall back to assistant text if none.
+    """
+    assistant_fallback = ""
     try:
         with path.open() as f:
             for line in f:
@@ -78,29 +117,24 @@ def _extract_first_user_input(path: Path) -> str:
                     d = json.loads(line)
                 except Exception:
                     continue
-                if d.get("type") == "event_msg":
-                    payload = d.get("payload") or {}
-                    if payload.get("role") == "user":
-                        content = payload.get("content")
-                        if isinstance(content, str) and content.strip():
-                            return content[:300]
-                        if isinstance(content, list):
-                            for c in content:
-                                if isinstance(c, dict) and c.get("type") == "input_text":
-                                    t = (c.get("text") or "").strip()
-                                    if t:
-                                        return t[:300]
-                if d.get("type") == "response_item":
-                    payload = d.get("payload") or {}
-                    if payload.get("type") == "message":
-                        for c in (payload.get("content") or []):
-                            if isinstance(c, dict) and c.get("type") == "output_text":
-                                t = (c.get("text") or "").strip()
-                                if t:
-                                    return t[:300]
+                if d.get("type") != "response_item":
+                    continue
+                payload = d.get("payload") or {}
+                if payload.get("type") != "message":
+                    continue
+                role = payload.get("role")
+                text = _first_text(payload.get("content"))
+                if not text:
+                    continue
+                if role == "user":
+                    if any(text.startswith(p) for p in _SYNTHETIC_PREFIXES):
+                        continue
+                    return text[:300]
+                if role == "assistant" and not assistant_fallback:
+                    assistant_fallback = text[:300]
     except Exception:
         pass
-    return ""
+    return assistant_fallback
 
 
 def extract_codex_session_activity(path: Path | str) -> dict:
@@ -115,6 +149,7 @@ def extract_codex_session_activity(path: Path | str) -> dict:
                 "per_skill_invokes": {}, "per_skill_reads": {},
                 "per_skill_writes": {}, "per_skill_bash_refs": {},
             },
+            "metrics": {},
         }
 
     bash_refs: dict[str, int] = {}
@@ -123,6 +158,15 @@ def extract_codex_session_activity(path: Path | str) -> dict:
     memory_ops_seen: set[tuple[str, str]] = set()
     memory_ops: list[dict] = []
     model = ""
+
+    # --- mining metrics (single-pass alongside skill scan) ---
+    m_tokens = {"input": 0, "output": 0, "cache_read": 0,
+                "cache_creation": 0, "reasoning": 0, "total": 0}
+    m_tools: dict[str, int] = {}
+    m_turns = 0
+    m_first_ts = m_last_ts = ""
+    ctx_window = 0
+    ctx_pct = None
 
     try:
         with p.open() as f:
@@ -133,6 +177,26 @@ def extract_codex_session_activity(path: Path | str) -> dict:
                     continue
                 t = d.get("type", "")
                 payload = d.get("payload") or {}
+                ts = d.get("timestamp", "")
+                if ts:
+                    if not m_first_ts:
+                        m_first_ts = ts
+                    m_last_ts = ts
+
+                # token_count carries the running cumulative usage; keep the last.
+                if t == "event_msg" and payload.get("type") == "token_count":
+                    info = payload.get("info") or {}
+                    tot = info.get("total_token_usage") or {}
+                    if tot:
+                        m_tokens["input"] = tot.get("input_tokens", 0) or 0
+                        m_tokens["cache_read"] = tot.get("cached_input_tokens", 0) or 0
+                        m_tokens["output"] = tot.get("output_tokens", 0) or 0
+                        m_tokens["reasoning"] = tot.get("reasoning_output_tokens", 0) or 0
+                        m_tokens["total"] = tot.get("total_tokens", 0) or 0
+                    ctx_window = info.get("model_context_window", 0) or ctx_window
+                    prim = (payload.get("rate_limits") or {}).get("primary") or {}
+                    if prim.get("used_percent") is not None:
+                        ctx_pct = prim["used_percent"]
 
                 if t == "turn_context":
                     m = payload.get("model", "")
@@ -141,9 +205,15 @@ def extract_codex_session_activity(path: Path | str) -> dict:
 
                 if t != "response_item":
                     continue
+
+                # count user/assistant messages + every function call (tool histogram)
+                if payload.get("type") == "message":
+                    if payload.get("role") in ("user", "assistant"):
+                        m_turns += 1
                 if payload.get("type") != "function_call":
                     continue
                 name = payload.get("name", "")
+                m_tools[name] = m_tools.get(name, 0) + 1
                 if name != "exec_command":
                     continue
 
@@ -186,6 +256,21 @@ def extract_codex_session_activity(path: Path | str) -> dict:
         pass
 
     skills_used = list(set(list(skill_reads.keys()) + list(skill_writes.keys())))
+    from .metrics import _duration
+    seen_input = m_tokens["input"] + m_tokens["cache_creation"] + m_tokens["cache_read"]
+    metrics = {
+        "tokens": m_tokens,
+        "cache_hit": round(m_tokens["cache_read"] / seen_input, 3) if seen_input else None,
+        "context_pct": ctx_pct,
+        "context_window": ctx_window or None,
+        "duration_sec": _duration(m_first_ts, m_last_ts),
+        "turns": m_turns,
+        "tools": m_tools,
+        "files": [],
+        "errors": 0,
+        "cost_usd": None,  # codex is a subscription — show tokens/context%, not $
+        "model": model,
+    }
     return {
         "skills_used": skills_used,
         "memory_ops": memory_ops,
@@ -196,6 +281,7 @@ def extract_codex_session_activity(path: Path | str) -> dict:
             "per_skill_writes": skill_writes,
             "per_skill_bash_refs": bash_refs,
         },
+        "metrics": metrics,
     }
 
 
@@ -240,11 +326,182 @@ def list_codex_sessions() -> list[CodexSession]:
             skills_used=activity["skills_used"],
             memory_ops=activity["memory_ops"],
             skill_breakdown=activity["skill_breakdown"],
+            metrics=activity.get("metrics", {}),
         )
         _codex_cache[key] = (int(st.st_mtime * 1000), st.st_size, cs)
         sessions.append(cs)
     sessions.sort(key=lambda s: s.transcript_mtime, reverse=True)
     return sessions
+
+
+# ---------------------------------------------------------------------------
+# Live codex tracking for the top board.
+#
+# Codex (unlike Claude Code) writes no pid registry under ~/.claude/sessions/, so
+# `sessions.list_windows()` never sees a running codex task. We instead detect
+# live `codex` processes via ps, resolve each one's cwd with lsof, and match it to
+# the rollout file being appended in that directory.
+# ---------------------------------------------------------------------------
+
+def _running_codex_pids() -> list[int]:
+    try:
+        out = subprocess.check_output(["ps", "-axo", "pid=,comm="], text=True, timeout=4)
+    except Exception:
+        return []
+    pids: list[int] = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_s, comm = parts
+        # comm is the full executable path; match the codex binary itself, not the
+        # node wrapper that launches it.
+        if os.path.basename(comm) == "codex":
+            try:
+                pids.append(int(pid_s))
+            except ValueError:
+                continue
+    return pids
+
+
+def _pid_cwd(pid: int) -> Optional[str]:
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-a", "-d", "cwd", "-Fn", "-p", str(pid)],
+            text=True, timeout=4, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if line.startswith("n"):
+            return line[1:].strip() or None
+    return None
+
+
+# Cache the (expensive) full codex scan + lsof between snapshot polls. The scan
+# (rglob over 1400+ files) and per-pid lsof only need re-running when the set of
+# running codex pids changes; otherwise we just refresh idle_seconds on the cached
+# windows. Keyed on the running-pid set; short TTL bounds staleness.
+_win_cache: dict = {"pids": None, "windows": [], "ts": 0.0}
+_WIN_CACHE_TTL = 10.0
+
+
+def list_codex_windows() -> list[dict]:
+    """Live codex sessions as Window-compatible dicts (platform='codex').
+
+    For each running codex process we take its cwd and pick the most recently
+    written rollout in that directory as the active session. Dicts mirror
+    sessions.Window.to_dict() so the dashboard renders them like Claude cards.
+    """
+    pids = _running_codex_pids()
+    if not pids:
+        _win_cache.update(pids=(), windows=[], ts=time.time())
+        return []
+
+    now = time.time()
+    now_ms = int(now * 1000)
+    pidset = tuple(sorted(pids))
+    if pidset == _win_cache["pids"] and now - _win_cache["ts"] < _WIN_CACHE_TTL:
+        # Same processes as last scan — skip the rescan, just age the idle clock.
+        for w in _win_cache["windows"]:
+            w["idle_seconds"] = max(0, int((now_ms - w["updated_at"]) / 1000))
+        return _win_cache["windows"]
+
+    # cwd -> newest matching CodexSession (the file being appended right now).
+    by_cwd: dict[str, CodexSession] = {}
+    for cs in list_codex_sessions():  # already mtime-sorted, newest first
+        cur = by_cwd.get(cs.project)
+        if cs.project and (cur is None or cs.transcript_mtime > cur.transcript_mtime):
+            by_cwd[cs.project] = cs
+
+    from .sessions import get_tty
+
+    windows: dict[str, dict] = {}
+    for pid in pids:
+        cwd = _pid_cwd(pid)
+        if not cwd:
+            continue
+        cs = by_cwd.get(cwd)
+        if not cs:
+            continue
+        # One card per session even if codex spawned several processes.
+        if cs.session_id in windows:
+            continue
+        windows[cs.session_id] = {
+            "pid": pid,
+            "session_id": cs.session_id,
+            "cwd": cwd,
+            "project_name": cs.project_name,
+            "project_slug": "",
+            "name": cs.first_input or cs.project_name,
+            "first_input": cs.first_input,
+            "status": "running",
+            "waiting_for": None,
+            "started_at": cs.transcript_mtime,
+            "updated_at": cs.transcript_mtime,
+            "version": cs.cli_version,
+            "tty": get_tty(pid),
+            "transcript_path": cs.transcript_path,
+            "alive": True,
+            "platform": "codex",
+            "model": cs.model,
+            "idle_seconds": max(0, int((now_ms - cs.transcript_mtime) / 1000)),
+        }
+    result = list(windows.values())
+    _win_cache.update(pids=pidset, windows=result, ts=now)
+    return result
+
+
+def find_codex_transcript_path(session_id: str) -> Optional[Path]:
+    """Locate a codex rollout .jsonl by session id (it's embedded in the filename
+    after the timestamp, e.g. rollout-<ts>-<id>.jsonl)."""
+    if not CODEX_SESSIONS_DIR.exists():
+        return None
+    for f in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
+        if session_id in f.stem:
+            return f
+    return None
+
+
+def codex_meta(path: str | Path) -> dict:
+    """cwd + session id from the codex session_meta first line."""
+    m = _parse_session_meta(Path(path)) or {}
+    return {"cwd": m.get("cwd", ""), "session_id": m.get("id", "")}
+
+
+_current_task_cache: dict[str, tuple[int, int, Optional[str]]] = {}
+
+
+def codex_current_task(path: str | Path) -> Optional[str]:
+    """A one-line hint of where a codex session is, for the live card.
+
+    Mirrors transcripts.current_task_hint for Claude: prefer the latest assistant
+    message, else the latest tool call, else the latest user prompt. Cached by
+    (mtime, size) — codex_timeline reads the whole rollout, which can be tens of MB,
+    so the 2s poll must not re-parse an unchanged file every tick.
+    """
+    tp = str(path)
+    try:
+        st = Path(tp).stat()
+    except OSError:
+        return None
+    mtime, size = int(st.st_mtime * 1000), st.st_size
+    cached = _current_task_cache.get(tp)
+    if cached and cached[0] == mtime and cached[1] == size:
+        return cached[2]
+    evs = codex_timeline(path, limit=60)
+    result: Optional[str] = None
+    for kinds in (("assistant_text",), ("tool_use",), ("user_text",)):
+        for e in reversed(evs):
+            if e.get("kind") in kinds:
+                txt = (e.get("text") or e.get("tool") or "").strip()
+                if txt:
+                    result = txt[:160]
+                    break
+        if result:
+            break
+    _current_task_cache[tp] = (mtime, size, result)
+    return result
 
 
 def codex_timeline(path: str | Path, limit: int = 60) -> list[dict]:
@@ -289,24 +546,55 @@ def codex_timeline(path: str | Path, limit: int = 60) -> list[dict]:
                             "ts": ts, "kind": "tool_use",
                             "text": "", "tool": payload.get("name", "function"),
                             "role": "assistant",
-                            "extra": {"arguments": (payload.get("arguments") or "")[:200]},
+                            "extra": {"arguments": (payload.get("arguments") or "")[:2000]},
                         })
                     elif item_type == "function_call_output":
+                        out = payload.get("output")
+                        if isinstance(out, dict):
+                            out = out.get("output") or out.get("content") or json.dumps(out)
                         events.append({
                             "ts": ts, "kind": "tool_result",
-                            "text": (payload.get("output") or "")[:200],
+                            "text": str(out or "")[:4000],
                             "tool": None, "role": "user", "extra": {},
                         })
+                    elif item_type == "reasoning":
+                        # Codex encrypts the reasoning trace; only the (often empty)
+                        # summary list is human-readable. Skip when there's nothing.
+                        summary = payload.get("summary") or []
+                        text = "\n".join(
+                            s.get("text", "") if isinstance(s, dict) else str(s)
+                            for s in summary
+                        ).strip()
+                        if text:
+                            events.append({
+                                "ts": ts, "kind": "reasoning",
+                                "text": text[:4000], "tool": None,
+                                "role": "assistant", "extra": {},
+                            })
                     elif item_type == "message":
-                        content = payload.get("content")
-                        if isinstance(content, list):
-                            for c in content:
-                                if isinstance(c, dict) and c.get("type") == "output_text":
-                                    events.append({
-                                        "ts": ts, "kind": "assistant_text",
-                                        "text": (c.get("text") or "")[:4000],
-                                        "tool": None, "role": "assistant", "extra": {},
-                                    })
+                        role = payload.get("role", "")
+                        for c in (payload.get("content") or []):
+                            if not isinstance(c, dict):
+                                continue
+                            ctype = c.get("type")
+                            text = (c.get("text") or "").strip()
+                            if not text:
+                                continue
+                            if ctype == "output_text":
+                                events.append({
+                                    "ts": ts, "kind": "assistant_text",
+                                    "text": text[:4000], "tool": None,
+                                    "role": "assistant", "extra": {},
+                                })
+                            elif ctype == "input_text" and role == "user":
+                                # the genuine user prompt — skip synthetic wrappers
+                                if any(text.startswith(p) for p in _SYNTHETIC_PREFIXES):
+                                    continue
+                                events.append({
+                                    "ts": ts, "kind": "user_text",
+                                    "text": text[:4000], "tool": None,
+                                    "role": "user", "extra": {},
+                                })
     except Exception:
         pass
     return events[-limit:]

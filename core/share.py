@@ -7,7 +7,7 @@ from __future__ import annotations
 import html
 import json
 
-from . import transcripts
+from . import codex, transcripts
 from .redaction import redact as _redact
 from .sessions import PROJECTS_DIR
 
@@ -49,17 +49,28 @@ def _esc(s: str, redact: bool) -> str:
 
 
 def render_session_html(session_id: str, redact: bool = False) -> tuple[str, str]:
-    """Return (title, html) for a session, or raise FileNotFoundError."""
-    path = transcripts.find_transcript_path(session_id)
-    if path is None:
-        raise FileNotFoundError(f"no transcript for session {session_id}")
+    """Return (title, html) for a session, or raise FileNotFoundError.
 
-    meta = _meta_from_transcript(path)
+    Works for both Claude and Codex transcripts — Codex rollouts live under
+    ~/.codex/sessions and use a different JSONL schema, so we dispatch on which
+    store the session id is found in.
+    """
+    path = transcripts.find_transcript_path(session_id)
+    if path is not None:
+        meta = _meta_from_transcript(path)
+        events = transcripts.timeline(str(path), limit=5000)
+        skills = transcripts.extract_skills_used(str(path))
+    else:
+        path = codex.find_codex_transcript_path(session_id)
+        if path is None:
+            raise FileNotFoundError(f"no transcript for session {session_id}")
+        meta = codex.codex_meta(path)
+        events = codex.codex_timeline(str(path), limit=5000)
+        skills = codex.extract_codex_session_activity(path)["skills_used"]
+
     cwd = meta.get("cwd", "")
     project = cwd.rsplit("/", 1)[-1] if cwd else session_id[:8]
     title = f"{project} · {session_id[:8]}"
-    events = transcripts.timeline(str(path), limit=5000)
-    skills = transcripts.extract_skills_used(str(path))
 
     parts: list[str] = []
     for ev in events:

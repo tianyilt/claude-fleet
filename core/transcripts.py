@@ -44,6 +44,21 @@ def _tail_lines(path: Path, n: int) -> list[dict]:
     return list(buf)
 
 
+def transcript_cwd(path: str | Path) -> Optional[str]:
+    """The real working directory a Claude session ran in.
+
+    Claude transcripts record a `cwd` on most event records; the first one is the
+    source of truth for resuming (`claude --resume` looks the session up under the
+    project dir derived from cwd). Far more reliable than reversing the project-dir
+    slug, which is lossy (`/`, `_`, `.` all collapse to `-`).
+    """
+    for d in _iter_lines(Path(path)):
+        cwd = d.get("cwd")
+        if cwd:
+            return cwd
+    return None
+
+
 def _flatten_assistant(msg: dict) -> list[TurnEvent]:
     out: list[TurnEvent] = []
     content = msg.get("content") or []
@@ -490,3 +505,47 @@ def extract_plan_history(path: str | Path) -> list[dict]:
                     "uuid": d.get("uuid", ""),  # source line → jump / fork-at-node
                 })
     return history
+
+
+# --- live-window enrichment cache -------------------------------------------
+# The 2s dashboard poll used to run current_task_hint + extract_skills_used +
+# extract_memory_ops + extract_background_tasks on EVERY live window EVERY tick —
+# four uncached whole-file scans per window. On a big, growing transcript that is
+# tens of MB of JSON parsing every 2s, forever, just from having the dashboard
+# open. Cache the bundle by (mtime, size): an idle window (transcript unchanged)
+# does zero file reads; only an actively-written window re-scans, and only when
+# it actually changes.
+_window_enrich_cache: dict[str, tuple[int, int, dict]] = {}
+
+
+def window_enrichment(path: str | Path) -> dict:
+    """current_task / skills_used / memory_ops / background_tasks for a live
+    window, cached by (mtime, size). Reused by the snapshot poll and timelines."""
+    tp = str(path)
+    p = Path(tp)
+    try:
+        st = p.stat()
+    except OSError:
+        return {"current_task": None, "skills_used": [],
+                "memory_ops": [], "background_tasks": []}
+    mtime, size = int(st.st_mtime * 1000), st.st_size
+    cached = _window_enrich_cache.get(tp)
+    if cached and cached[0] == mtime and cached[1] == size:
+        return cached[2]
+    bundle = {
+        "current_task": current_task_hint(tp),
+        "skills_used": extract_skills_used(tp),
+        "memory_ops": extract_memory_ops(tp),
+        "background_tasks": extract_background_tasks(tp),
+    }
+    _window_enrich_cache[tp] = (mtime, size, bundle)
+    return bundle
+
+
+def prune_window_enrich_cache(live_paths) -> None:
+    """Drop cache entries for transcripts no longer live, so the cache stays the
+    size of the (few) active windows rather than growing without bound."""
+    keep = {str(p) for p in live_paths if p}
+    for tp in list(_window_enrich_cache.keys()):
+        if tp not in keep:
+            _window_enrich_cache.pop(tp, None)

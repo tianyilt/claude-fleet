@@ -54,6 +54,7 @@ class HistorySession:
     memory_ops: list = field(default_factory=list)
     skill_breakdown: dict = field(default_factory=dict)
     memory_breakdown: dict = field(default_factory=dict)
+    metrics: dict = field(default_factory=dict)
 
 
 _cache: list[HistorySession] = []
@@ -181,6 +182,7 @@ def _enrich_transcript(tp: str, mtime: int, size: int) -> dict:
     if cached and cached[0] == mtime and cached[1] == size:
         return cached[2]
     from .transcripts import extract_memory_ops, count_skill_activity, count_memory_activity
+    from .metrics import claude_metrics
     path = Path(tp)
     sa = count_skill_activity(tp)
     enrichment = {
@@ -195,6 +197,7 @@ def _enrich_transcript(tp: str, mtime: int, size: int) -> dict:
             "per_skill_bash_refs": sa.get("per_skill_bash_refs", {}),
         },
         "memory_breakdown": count_memory_activity(tp),
+        "metrics": claude_metrics(tp),
     }
     _enrich_cache[tp] = (mtime, size, enrichment)
     return enrichment
@@ -213,6 +216,14 @@ def _build_index() -> list[HistorySession]:
         t = transcripts.get(sid, {})
 
         project = h.get("project", "")
+        tp = t.get("path")
+        if not project and tp:
+            # history.jsonl had no entry for this session — recover the real cwd
+            # from the transcript so Resume/Fork open in the right directory
+            # (otherwise we'd fall back to $HOME and `claude --resume` would fail
+            # with "No conversation found", flash-closing the terminal).
+            from .transcripts import transcript_cwd
+            project = transcript_cwd(tp) or ""
         project_name = project.rsplit("/", 1)[-1] if project else (
             t.get("project_slug", "").replace("-", "/").split("/")[-1] or "unknown"
         )
@@ -223,7 +234,7 @@ def _build_index() -> list[HistorySession]:
         model = ""
         skill_breakdown = {}
         memory_breakdown = {}
-        tp = t.get("path")
+        metrics = {}
         if tp:
             enr = _enrich_transcript(tp, t.get("mtime", 0), t.get("size", 0))
             if not first_input:
@@ -233,6 +244,7 @@ def _build_index() -> list[HistorySession]:
             model = enr["model"]
             skill_breakdown = enr["skill_breakdown"]
             memory_breakdown = enr["memory_breakdown"]
+            metrics = enr.get("metrics", {})
 
         sessions.append(HistorySession(
             session_id=sid,
@@ -252,6 +264,7 @@ def _build_index() -> list[HistorySession]:
             memory_ops=mem_ops,
             skill_breakdown=skill_breakdown,
             memory_breakdown=memory_breakdown,
+            metrics=metrics,
         ))
 
     # Merge Codex sessions
@@ -369,12 +382,23 @@ def _rg_search_sessions(query: str) -> dict[str, list[str]]:
     return result
 
 
+_SORT_KEYS = {
+    "tokens": lambda s: (s.metrics.get("tokens") or {}).get("total", 0) or 0,
+    "cost": lambda s: s.metrics.get("cost_usd") or 0,
+    "duration": lambda s: s.metrics.get("duration_sec") or 0,
+    "turns": lambda s: s.metrics.get("turns") or 0,
+}
+
+
 def list_sessions(
     q: Optional[str] = None,
     page: int = 1,
     limit: int = 30,
     include_alive: bool = True,
     platform: Optional[str] = None,
+    platforms: Optional[list] = None,
+    skills: Optional[list] = None,
+    sort: str = "recency",
 ) -> dict:
     global _cache, _cache_ts
     now = time.time()
@@ -387,6 +411,16 @@ def list_sessions(
         filtered = [s for s in filtered if not s.is_alive]
     if platform:
         filtered = [s for s in filtered if s.platform == platform]
+    # Multi-select facets (Feishu-bitable style): keep sessions matching ANY of
+    # the selected platforms, and ANY of the selected skills.
+    if platforms:
+        pset = {p for p in platforms if p}
+        if pset:
+            filtered = [s for s in filtered if s.platform in pset]
+    if skills:
+        skset = {sk for sk in skills if sk}
+        if skset:
+            filtered = [s for s in filtered if skset & set(s.skills_used or [])]
     rg_matches: dict[str, list[str]] = {}
     if q:
         ql = q.lower()
@@ -412,6 +446,11 @@ def list_sessions(
             pass
         all_sids = meta_sids | set(rg_matches.keys())
         filtered = [s for s in filtered if s.session_id in all_sids]
+
+    # Rank by a numeric metric (desc); default keeps the recency order of _cache.
+    keyfn = _SORT_KEYS.get(sort)
+    if keyfn:
+        filtered = sorted(filtered, key=keyfn, reverse=True)
 
     total = len(filtered)
     start = (page - 1) * limit

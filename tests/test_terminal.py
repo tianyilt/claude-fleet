@@ -79,6 +79,23 @@ def test_launch_success_spawns_detached(monkeypatch):
     assert calls.get("spawned") is True
 
 
+# ---------- keepalive script (Fix 1b: no exec, hold window open on fast exit) ----------
+
+def test_keepalive_script_no_exec():
+    # `exec` replaced the shell so a failed resume flash-closed the window before
+    # the error could be read. The body must run the command without exec.
+    body = terminal._keepalive_script("cd /tmp && claude --resume sid")
+    assert "exec " not in body
+    assert "claude --resume sid" in body
+
+
+def test_keepalive_script_holds_open_on_fast_exit():
+    body = terminal._keepalive_script("claude --resume bad")
+    # sub-3s guard + read keeps the window so "No conversation found" is visible.
+    assert "read -r" in body
+    assert "-lt 3" in body
+
+
 # ---------- focus ----------
 
 def test_focus_non_mac_unsupported(monkeypatch):
