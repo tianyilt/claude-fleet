@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from core import actions, codex, history, memory, patrol, perms, plans, search, sessions, share, skills, terminal, transcripts
+from core import actions, codex, history, insights, memory, patrol, perms, plans, search, sessions, share, skills, terminal, transcripts
 
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
@@ -30,10 +30,13 @@ class State:
         self.subscribers: set[asyncio.Queue] = set()
 
     def diff_signature(self, snap: dict) -> tuple:
-        # Tuple of (pid, status, waiting_for, updated_at) lets us tell whether
-        # anything dashboard-visible has changed.
+        # Tuple of (pid, status, waiting_for, updated_at, idle_bucket) lets us tell
+        # whether anything dashboard-visible has changed. The 30s idle bucket makes
+        # idle cards (esp. codex, whose updated_at = transcript mtime never moves
+        # while idle) keep refreshing their "Xm ago" without per-second churn.
         return tuple(
-            (w["pid"], w["status"], w["waiting_for"], w["updated_at"])
+            (w["pid"], w["status"], w["waiting_for"], w["updated_at"],
+             w.get("idle_seconds", 0) // 30)
             for w in snap["windows"]
         )
 
@@ -41,10 +44,15 @@ class State:
 state = State()
 
 
+# session_id -> first user message (immutable per session; avoids a per-poll read).
+_first_input_cache: dict[str, str] = {}
+
+
 def _enriched_snapshot() -> dict:
     snap = sessions.snapshot()
     perm_by_tty = perms.pending_by_tty()
     for w in snap["windows"]:
+        w["platform"] = "claude"
         tty = w.get("tty")
         if tty and tty in perm_by_tty:
             ev = perm_by_tty[tty]
@@ -55,26 +63,58 @@ def _enriched_snapshot() -> dict:
             w["permission_ts"] = None
         tp = w.get("transcript_path")
         if not w.get("name") and tp:
-            from core.history import _extract_first_user_text
-            first = _extract_first_user_text(Path(tp))
-            if first:
-                w["first_input"] = first[:100]
+            # First user message never changes for a session — cache it by id so
+            # nameless windows don't re-read the transcript every 2s tick.
+            sid = w.get("session_id", "")
+            if sid not in _first_input_cache:
+                from core.history import _extract_first_user_text
+                _first_input_cache[sid] = (_extract_first_user_text(Path(tp)) or "")[:100]
+            if _first_input_cache[sid]:
+                w["first_input"] = _first_input_cache[sid]
+        # One cached bundle (by transcript mtime) instead of four uncached
+        # whole-file scans per window per 2s tick.
         if tp:
-            w["current_task"] = transcripts.current_task_hint(tp)
+            enr = transcripts.window_enrichment(tp)
+            w["current_task"] = enr["current_task"]
+            w["skills_used"] = enr["skills_used"]
+            w["memory_ops"] = enr["memory_ops"]
+            w["background_tasks"] = enr["background_tasks"]
         else:
             w["current_task"] = None
+            w["skills_used"] = []
+            w["memory_ops"] = []
+            w["background_tasks"] = []
         tri = patrol.classify(w)
         w["triage"] = tri["triage"]
         w["triage_reason"] = tri["reason"]
         w["triage_suggestion"] = tri["suggestion"]
-        if tp:
-            w["skills_used"] = transcripts.extract_skills_used(tp)
-            w["memory_ops"] = transcripts.extract_memory_ops(tp)
-            w["background_tasks"] = transcripts.extract_background_tasks(tp)
-        else:
-            w["skills_used"] = []
-            w["memory_ops"] = []
-            w["background_tasks"] = []
+    # Codex writes no pid registry, so running codex tasks are invisible to
+    # sessions.list_windows(). Detect them separately and render as live cards.
+    # Their transcripts are a different format, so skip the Claude-specific
+    # enrichment (perms/triage/skills) and supply neutral defaults.
+    try:
+        for cw in codex.list_codex_windows():
+            idle = cw.get("idle_seconds", 0)
+            cw.setdefault("permission_msg", None)
+            cw.setdefault("permission_ts", None)
+            tp = cw.get("transcript_path")
+            cw["current_task"] = codex.codex_current_task(tp) if tp else None
+            # Idle past the threshold with the transcript settled → likely done;
+            # otherwise it's actively working. (No stop_reason in codex rollouts.)
+            cw["triage"] = "completed" if idle > patrol.IDLE_THRESHOLD else "working"
+            cw["triage_reason"] = "codex · idle" if idle > patrol.IDLE_THRESHOLD else "codex · active"
+            cw["triage_suggestion"] = ""
+            cw.setdefault("skills_used", [])
+            cw.setdefault("memory_ops", [])
+            cw.setdefault("background_tasks", [])
+            snap["windows"].append(cw)
+        snap["counts"]["total"] = len(snap["windows"])
+    except Exception as e:
+        print(f"[snapshot] codex windows error: {e}")
+    # Keep the per-window caches bounded to the transcripts that are actually live.
+    live_tps = [w.get("transcript_path") for w in snap["windows"]]
+    transcripts.prune_window_enrich_cache(live_tps)
+    patrol.prune_last_info_cache(live_tps)
     # Sort by triage priority (most urgent first), then by idle time.
     snap["windows"].sort(key=lambda w: (
         patrol.TRIAGE_PRIORITY.get(w.get("triage", ""), 99),
@@ -84,10 +124,15 @@ def _enriched_snapshot() -> dict:
 
 
 async def _watcher() -> None:
-    """Poll sessions every 2s; broadcast deltas to SSE subscribers."""
+    """Poll sessions every 2s; broadcast deltas to SSE subscribers.
+
+    `_enriched_snapshot` is synchronous, disk-bound work; run it in a thread so a
+    slow/cold poll never blocks the event loop (and the SSE/HTTP handlers on it).
+    """
+    loop = asyncio.get_event_loop()
     while True:
         try:
-            snap = _enriched_snapshot()
+            snap = await loop.run_in_executor(None, _enriched_snapshot)
             sig = state.diff_signature(snap)
             state.last_snapshot = snap
             if sig != state.last_signature:
@@ -133,10 +178,33 @@ def api_windows() -> dict:
     return state.last_snapshot
 
 
+def _snapshot_window(pid: int) -> Optional[dict]:
+    """Find a live window dict by pid in the last snapshot — covers codex windows,
+    which aren't in sessions.find_window (Claude registry only)."""
+    for cw in state.last_snapshot.get("windows", []):
+        if cw.get("pid") == pid:
+            return cw
+    return None
+
+
 @app.get("/api/windows/{pid}/timeline")
 def api_timeline(pid: int, limit: int = 2000) -> dict:
     w = sessions.find_window(pid)
     if not w:
+        # Codex live window — has no Claude registry entry; serve its codex timeline.
+        cw = _snapshot_window(pid)
+        if cw and cw.get("platform") == "codex":
+            tp = cw.get("transcript_path") or ""
+            return {
+                "pid": pid,
+                "session_id": cw.get("session_id", ""),
+                "project_name": cw.get("project_name", ""),
+                "platform": "codex",
+                "events": codex.codex_timeline(tp, limit=limit) if tp else [],
+                "skills_used": cw.get("skills_used", []),
+                "memory_ops": [],
+                "plan_history": [],
+            }
         raise HTTPException(404, "window not found")
     tp = w.transcript_path or ""
     events = transcripts.timeline(tp, limit=limit) if tp else []
@@ -183,25 +251,51 @@ def api_plan_by_name(name: str) -> dict:
 @app.post("/api/windows/{pid}/focus")
 def api_focus(pid: int) -> dict:
     w = sessions.find_window(pid)
+    tty = w.tty if w else None
     if not w:
-        raise HTTPException(404, "window not found")
-    if not w.tty:
-        return {"ok": False, "error": "no tty available for this pid"}
-    return terminal.focus(w.tty)
+        # Codex live cards aren't in the Claude window list — look them up live
+        # (not via the possibly-stale snapshot) and read their tty.
+        try:
+            for cw in codex.list_codex_windows():
+                if cw.get("pid") == pid:
+                    tty = cw.get("tty")
+                    break
+        except Exception:
+            pass
+        if tty is None and not any(
+            cw.get("pid") == pid for cw in state.last_snapshot.get("windows", [])
+        ):
+            # Return structured JSON (not a 404) so the UI shows a real message.
+            return {"ok": False, "error": "window not found — it may have exited"}
+    if not tty:
+        return {"ok": False, "error": (
+            "this session has no terminal to focus — it's running headless "
+            "(IDE/SDK). Use Timeline or Fork instead.")}
+    return terminal.focus(tty)
 
 
 @app.post("/api/windows/{pid}/fork")
 def api_fork(pid: int) -> dict:
+    cw = _snapshot_window(pid)
+    if cw and cw.get("platform") == "codex":
+        return terminal.launch_session(
+            "codex", cw.get("session_id", ""), cw.get("cwd", ""), fork=True)
     return actions.fork_session(pid)
 
 
 @app.post("/api/windows/{pid}/close")
 def api_close(pid: int) -> dict:
+    cw = _snapshot_window(pid)
+    if cw and cw.get("platform") == "codex":
+        return {"ok": False, "error": "codex sessions can't be closed from the dashboard"}
     return actions.close_session(pid)
 
 
 @app.post("/api/windows/{pid}/review")
 def api_review(pid: int) -> dict:
+    cw = _snapshot_window(pid)
+    if cw and cw.get("platform") == "codex":
+        return {"ok": False, "error": "background review is Claude-only"}
     return actions.review_session_start(pid)
 
 
@@ -210,9 +304,22 @@ def api_review_result(pid: int) -> dict:
     return actions.review_session_result(pid)
 
 
+@app.get("/api/insights")
+def api_insights() -> dict:
+    """Cross-session mining: token/cost totals, model/project/day breakdowns,
+    tool histogram, activity heatmap, leaderboards, hot files."""
+    data = history.list_sessions(limit=99999)
+    return insights.build_insights(data["sessions"])
+
+
 @app.get("/api/history")
-def api_history(q: str = "", page: int = 1, limit: int = 30) -> dict:
-    return history.list_sessions(q=q or None, page=page, limit=limit)
+def api_history(q: str = "", page: int = 1, limit: int = 30,
+                platforms: str = "", skills: str = "", sort: str = "recency") -> dict:
+    return history.list_sessions(
+        q=q or None, page=page, limit=limit, sort=sort,
+        platforms=[p for p in platforms.split(",") if p] or None,
+        skills=[s for s in skills.split(",") if s] or None,
+    )
 
 
 @app.get("/api/history/{session_id}/timeline")
@@ -267,6 +374,10 @@ def api_history_resume(session_id: str) -> dict:
         return {"ok": False, "error": "session not found in index"}
     platform = sess.get("platform", "claude")
     cwd = sess.get("project") or str(Path.home())
+    if cwd and not Path(cwd).is_dir():
+        return {"ok": False, "error": (
+            f"project directory not found: {cwd} — restore it or delete the session "
+            "(otherwise the terminal would open in the wrong place)")}
     # If a live Claude session owns a tty, focus it instead of opening a duplicate.
     if platform == "claude":
         for w in sessions.list_windows():
@@ -287,6 +398,9 @@ def api_history_fork(session_id: str) -> dict:
         return {"ok": False, "error": "session not found in index"}
     platform = sess.get("platform", "claude")
     cwd = sess.get("project") or str(Path.home())
+    if cwd and not Path(cwd).is_dir():
+        return {"ok": False, "error": (
+            f"project directory not found: {cwd} — restore it or delete the session")}
     return terminal.launch_session(platform, session_id, cwd, fork=True)
 
 

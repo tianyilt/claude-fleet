@@ -66,6 +66,10 @@
             class="text-xs border px-2 py-1 rounded hover:bg-purple-50 transition"
             :class="showMemory ? 'border-purple-400 text-purple-600 bg-purple-50' : 'border-gray-200 text-gray-600'">
       Memory</button>
+    <button @click="showInsights = !showInsights; if(showInsights) loadInsights()"
+            class="text-xs border px-2 py-1 rounded hover:bg-indigo-50 transition"
+            :class="showInsights ? 'border-indigo-400 text-indigo-600 bg-indigo-50' : 'border-gray-200 text-gray-600'">
+      Insights</button>
   </div>
   <div class="flex items-center gap-2">
     <input type="text" placeholder="Search..." x-model="searchQuery"
@@ -84,6 +88,120 @@
 </header>
 
 <main class="px-6 py-4">
+
+  <!-- ===== Insights panel ===== -->
+  <div x-show="showInsights" class="mb-4 bg-white rounded-xl shadow-sm border p-4" x-transition>
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold text-sm">Insights <span class="text-gray-400 font-normal" x-show="insights" x-text="'· ' + (insights?.totals?.sessions||0) + ' sessions'"></span></h2>
+      <button @click="showInsights = false" class="text-gray-400 hover:text-gray-700">&times;</button>
+    </div>
+    <div x-show="!insights" class="text-xs text-gray-400 py-6 text-center">Crunching sessions…</div>
+    <div x-show="insights" class="space-y-4">
+      <!-- KPI cards -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-center">
+        <div class="bg-indigo-50 rounded-lg p-2">
+          <div class="text-[10px] text-indigo-400 uppercase tracking-wide">Tokens</div>
+          <div class="text-sm font-semibold text-indigo-700" x-text="fmtTokens(insights?.totals?.tokens_total)"></div>
+        </div>
+        <div class="bg-emerald-50 rounded-lg p-2">
+          <div class="text-[10px] text-emerald-500 uppercase tracking-wide">Claude $ (est)</div>
+          <div class="text-sm font-semibold text-emerald-700" x-text="'$'+(insights?.totals?.cost_usd||0).toLocaleString()"></div>
+        </div>
+        <div class="bg-gray-50 rounded-lg p-2">
+          <div class="text-[10px] text-gray-400 uppercase tracking-wide">Active time</div>
+          <div class="text-sm font-semibold text-gray-700" x-text="Math.round((insights?.totals?.duration_sec||0)/3600).toLocaleString()+'h'"></div>
+        </div>
+        <div class="bg-blue-50 rounded-lg p-2">
+          <div class="text-[10px] text-blue-400 uppercase tracking-wide">Claude</div>
+          <div class="text-sm font-semibold text-blue-700" x-text="(insights?.totals?.sessions_claude||0)+' · '+fmtTokens(insights?.totals?.tokens_claude)"></div>
+        </div>
+        <div class="bg-green-50 rounded-lg p-2">
+          <div class="text-[10px] text-green-500 uppercase tracking-wide">Codex</div>
+          <div class="text-sm font-semibold text-green-700" x-text="(insights?.totals?.sessions_codex||0)+' · '+fmtTokens(insights?.totals?.tokens_codex)"></div>
+        </div>
+        <div class="bg-amber-50 rounded-lg p-2">
+          <div class="text-[10px] text-amber-500 uppercase tracking-wide">Models</div>
+          <div class="text-sm font-semibold text-amber-700" x-text="(insights?.by_model||[]).length"></div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- By model -->
+        <div>
+          <div class="text-xs font-semibold text-gray-500 mb-1">By model</div>
+          <template x-for="r in (insights?.by_model||[]).slice(0,8)" :key="r.model">
+            <div class="flex items-center gap-2 text-xs mb-0.5">
+              <span class="w-32 truncate text-gray-600" x-text="r.model"></span>
+              <div class="flex-1 bg-gray-100 rounded h-3 overflow-hidden">
+                <div class="bg-indigo-400 h-3" :style="`width:${barPct(r.tokens, insights.by_model[0].tokens)}%`"></div>
+              </div>
+              <span class="w-20 text-right text-gray-500" x-text="r.sessions+'· '+fmtTokens(r.tokens)"></span>
+            </div>
+          </template>
+        </div>
+        <!-- Tool histogram -->
+        <div>
+          <div class="text-xs font-semibold text-gray-500 mb-1">Top tools</div>
+          <template x-for="x in (insights?.tools||[]).slice(0,8)" :key="x.name">
+            <div class="flex items-center gap-2 text-xs mb-0.5">
+              <span class="w-32 truncate text-gray-600" x-text="x.name"></span>
+              <div class="flex-1 bg-gray-100 rounded h-3 overflow-hidden">
+                <div class="bg-blue-400 h-3" :style="`width:${barPct(x.count, insights.tools[0].count)}%`"></div>
+              </div>
+              <span class="w-14 text-right text-gray-500" x-text="x.count.toLocaleString()"></span>
+            </div>
+          </template>
+        </div>
+        <!-- Top projects -->
+        <div>
+          <div class="text-xs font-semibold text-gray-500 mb-1">Top projects (tokens)</div>
+          <template x-for="r in (insights?.by_project||[]).slice(0,8)" :key="r.project">
+            <div class="flex items-center gap-2 text-xs mb-0.5">
+              <span class="w-32 truncate text-gray-600" x-text="r.project"></span>
+              <div class="flex-1 bg-gray-100 rounded h-3 overflow-hidden">
+                <div class="bg-emerald-400 h-3" :style="`width:${barPct(r.tokens, insights.by_project[0].tokens)}%`"></div>
+              </div>
+              <span class="w-20 text-right text-gray-500" x-text="fmtTokens(r.tokens)"></span>
+            </div>
+          </template>
+        </div>
+        <!-- Activity heatmap by hour -->
+        <div>
+          <div class="text-xs font-semibold text-gray-500 mb-1">Activity by hour (UTC)</div>
+          <div class="flex items-end gap-0.5 h-16">
+            <template x-for="(v, h) in (insights?.heatmap?.hour||[])" :key="h">
+              <div class="flex-1 bg-indigo-400 rounded-t" :style="`height:${barPct(v, Math.max(...insights.heatmap.hour))}%`" :title="h+':00 · '+v"></div>
+            </template>
+          </div>
+          <div class="flex justify-between text-[9px] text-gray-300 mt-0.5"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>
+        </div>
+      </div>
+
+      <!-- Leaderboards -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <div class="text-xs font-semibold text-gray-500 mb-1">Most expensive (Claude $)</div>
+          <template x-for="r in (insights?.leaderboards?.cost||[])" :key="r.session_id">
+            <div class="flex items-center gap-2 text-xs py-0.5 hover:bg-gray-50 cursor-pointer rounded px-1"
+                 @click="openHistoryTimeline(r.session_id); showInsights=false">
+              <span class="px-1 rounded text-white text-[9px]" :class="r.platform==='codex'?'bg-green-500':'bg-blue-500'" x-text="r.platform"></span>
+              <span class="flex-1 truncate text-gray-600" x-text="r.project_name"></span>
+              <span class="text-emerald-600 font-medium" x-text="'$'+r.cost_usd"></span>
+            </div>
+          </template>
+        </div>
+        <div>
+          <div class="text-xs font-semibold text-gray-500 mb-1">Hot files (most sessions)</div>
+          <template x-for="x in (insights?.hot_files||[]).slice(0,8)" :key="x.name">
+            <div class="flex items-center gap-2 text-xs py-0.5">
+              <span class="flex-1 truncate text-gray-600 font-mono text-[11px]" x-text="x.name" :title="x.name"></span>
+              <span class="text-gray-500" x-text="x.count + '×'"></span>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- ===== Skills panel ===== -->
   <div x-show="showSkills && skillsList" class="mb-4 bg-white rounded-xl shadow-sm border p-4" x-transition>
@@ -249,11 +367,16 @@
     <template x-for="w in filteredWindows" :key="w.pid">
       <div class="bg-white rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer relative"
            :class="{ 'ring-2 ring-red-400': w.triage === 'waiting_perm', 'ring-2 ring-blue-400': expandedPid === w.pid }"
-           @click="toggleExpand(w.pid)">
+           @click="cardTimeline(w)">
         <div class="p-4 pb-2">
           <div class="flex items-center gap-2 mb-1">
             <span class="inline-block w-3 h-3 rounded-full shrink-0" :class="'triage-' + w.triage"></span>
             <span class="font-semibold text-sm truncate" x-text="w.name || w.first_input || w.project_name"></span>
+            <span x-show="w.platform === 'codex'"
+                  class="text-[10px] px-1.5 rounded text-white shrink-0 bg-green-500">codex</span>
+            <span x-show="w.alive && !w.tty"
+                  class="text-[10px] px-1.5 rounded shrink-0 bg-yellow-100 text-yellow-700"
+                  title="no controlling terminal (IDE/SDK session) — can't be focused">headless</span>
             <span class="text-[10px] px-1.5 rounded-full text-white shrink-0" :class="'triage-' + w.triage"
                   x-text="w.triage"></span>
           </div>
@@ -292,24 +415,26 @@
           </div>
         </div>
         <div class="px-4 pb-3 pt-1 flex gap-2 flex-wrap" @click.stop>
-          <button @click="focusWindow(w.pid)"
+          <!-- Focus raises the terminal tab owning this tty; headless (IDE/SDK)
+               sessions have no terminal, so there's nothing to focus → hide it. -->
+          <button x-show="w.tty" @click="focusWindow(w.pid)"
                   class="text-xs px-2 py-1 rounded border transition"
                   :class="w.triage === 'waiting_perm' ? 'border-red-300 text-red-600 hover:bg-red-50 font-medium' : 'border-gray-200 text-gray-600 hover:bg-gray-100'">
             Focus</button>
-          <button @click="toggleExpand(w.pid)"
+          <button @click="cardTimeline(w)"
                   class="text-xs border border-gray-200 text-gray-600 px-2 py-1 rounded hover:bg-gray-100 transition">
             Timeline</button>
-          <button x-show="w.triage === 'completed' || w.triage === 'stalled'"
+          <button x-show="w.platform !== 'codex' && (w.triage === 'completed' || w.triage === 'stalled')"
                   @click="reviewWindow(w.pid)"
                   class="text-xs border border-blue-200 text-blue-600 px-2 py-1 rounded hover:bg-blue-50 transition"
                   :class="reviewStatuses[w.pid]==='running' ? 'opacity-50 cursor-wait' : ''"
                   :disabled="reviewStatuses[w.pid]==='running'">
             <span x-text="reviewStatuses[w.pid]==='running' ? 'Reviewing...' : (reviewStatuses[w.pid]==='done' ? 'See Review' : 'Review')"></span></button>
-          <button x-show="w.triage === 'closeable'"
+          <button x-show="w.platform !== 'codex' && w.triage === 'closeable'"
                   @click="if(confirm('Close ' + (w.name||w.project_name) + '?')) closeWindow(w.pid)"
                   class="text-xs border border-gray-300 text-gray-500 px-2 py-1 rounded hover:bg-gray-100 transition">
             Close</button>
-          <button @click="forkWindow(w.pid)"
+          <button x-show="w.platform !== 'codex'" @click="forkWindow(w.pid)"
                   class="text-xs border border-green-200 text-green-600 px-2 py-1 rounded hover:bg-green-50 transition">
             Fork</button>
         </div>
@@ -503,13 +628,29 @@
   <!-- ===== History section ===== -->
   <div class="mt-8 bg-white rounded-xl shadow-sm border">
     <div class="px-5 py-3 border-b flex items-center justify-between">
-      <h2 class="font-semibold text-sm">History (<span x-text="historyTotal"></span>)</h2>
-      <div class="flex items-center gap-2">
+      <h2 class="font-semibold text-sm flex items-center gap-2">
+        History (<span x-text="historyTotal"></span>)
+        <span x-show="historyLoading" class="flex items-center gap-1 text-indigo-500 font-normal text-xs">
+          <svg class="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+          </svg>
+          <span x-text="'indexing ' + (historyLimit >= 500 ? 'all' : historyLimit) + ' sessions…'"></span>
+        </span>
+      </h2>
+      <div class="flex items-center gap-2" :class="historyLoading ? 'opacity-50 pointer-events-none' : ''">
         <input type="text" placeholder="Search history..." x-model="historyQuery"
                @keydown.enter="loadHistory(1)"
                class="border rounded px-2 py-1 text-xs w-48 focus:outline-none focus:ring-1 focus:ring-blue-400">
         <button @click="loadHistory(1)" class="text-xs text-blue-600 hover:underline">Go</button>
         <button @click="historyQuery=''; loadHistory(1)" class="text-xs text-gray-400 hover:text-gray-600" x-show="historyQuery">Clear</button>
+        <select x-model="historySort" @change="loadHistory(1)" class="border rounded px-1 py-1 text-xs bg-white" title="rank by">
+          <option value="recency">Recent</option>
+          <option value="tokens">Tokens ↓</option>
+          <option value="cost">Cost ↓</option>
+          <option value="duration">Duration ↓</option>
+          <option value="turns">Turns ↓</option>
+        </select>
         <select x-model.number="historyLimit" @change="loadHistory(1)" class="border rounded px-1 py-1 text-xs bg-white">
           <option value="10">10</option>
           <option value="20">20</option>
@@ -519,7 +660,39 @@
         </select>
       </div>
     </div>
-    <div class="divide-y max-h-[28rem] overflow-y-auto" x-show="historySessions.length > 0">
+    <!-- ===== Faceted filters (multi-select tags) ===== -->
+    <div class="px-5 py-2 border-b flex items-center gap-2 flex-wrap text-xs">
+      <span class="text-gray-400">Platform:</span>
+      <template x-for="p in ['claude','codex','opencode']" :key="p">
+        <button @click="togglePlatform(p)"
+                class="px-2 py-0.5 rounded-full border transition"
+                :class="historyPlatforms.includes(p)
+                  ? (p==='codex'?'bg-green-500 text-white border-green-500':p==='opencode'?'bg-orange-500 text-white border-orange-500':'bg-blue-500 text-white border-blue-500')
+                  : 'border-gray-200 text-gray-500 hover:bg-gray-100'"
+                x-text="p"></button>
+      </template>
+      <template x-if="facetSkills.length">
+        <span class="text-gray-300">·</span>
+      </template>
+      <span x-show="facetSkills.length" class="text-gray-400">Skill:</span>
+      <template x-for="sk in facetSkills" :key="sk.name">
+        <button @click="toggleSkill(sk.name)"
+                class="px-2 py-0.5 rounded-full border transition"
+                :class="historySkills.includes(sk.name) ? 'bg-purple-500 text-white border-purple-500' : 'border-gray-200 text-gray-500 hover:bg-purple-50'"
+                x-text="sk.name + ' ' + sk.count"></button>
+      </template>
+      <button x-show="historyPlatforms.length || historySkills.length"
+              @click="historyPlatforms=[]; historySkills=[]; loadHistory(1)"
+              class="text-gray-400 hover:text-gray-700 underline ml-auto">clear filters</button>
+    </div>
+    <div x-show="historyLoading" class="px-5 py-10 text-center text-xs text-gray-400">
+      <svg class="animate-spin h-5 w-5 mx-auto mb-2 text-indigo-400" viewBox="0 0 24 24" fill="none">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+      </svg>
+      Building session index — first load over hundreds of transcripts can take a few seconds…
+    </div>
+    <div class="divide-y max-h-[28rem] overflow-y-auto" x-show="!historyLoading && historySessions.length > 0">
       <template x-for="s in historySessions" :key="s.session_id">
         <div class="px-5 py-3 hover:bg-gray-50 cursor-pointer flex items-start gap-3 text-sm"
              @click="openHistoryTimeline(s.session_id)">
@@ -537,6 +710,14 @@
               <span x-show="s.model" class="text-gray-400" x-text="s.model?.split('/').pop()?.split('-').slice(0,3).join('-')"></span>
               <span x-text="String(s.first_ts || '').slice(0,10)"></span>
               <span x-text="Math.round(s.transcript_size/1024) + ' KB'"></span>
+              <!-- mining metrics -->
+              <span x-show="s.metrics?.tokens?.total" class="text-indigo-500" x-text="fmtTokens(s.metrics?.tokens?.total)" title="total tokens"></span>
+              <span x-show="s.metrics?.cost_usd" class="text-emerald-600 font-medium" x-text="'$'+ (s.metrics?.cost_usd||0).toFixed(2)" title="estimated cost"></span>
+              <span x-show="s.platform==='codex' && s.metrics?.context_pct != null" class="text-amber-600" x-text="'ctx '+s.metrics.context_pct+'%'" title="context window used"></span>
+              <span x-show="s.metrics?.duration_sec" class="text-gray-400" x-text="fmtDur(s.metrics?.duration_sec)" title="duration"></span>
+              <span x-show="s.metrics?.turns" class="text-gray-400" x-text="s.metrics.turns + ' turns'"></span>
+              <span x-show="topTool(s.metrics)" class="text-gray-400" x-text="topTool(s.metrics)" title="top tool"></span>
+              <span x-show="s.metrics?.errors" class="text-red-500" x-text="'⚠ '+s.metrics.errors" title="errors / token-limit hits"></span>
               <!-- Skill tags -->
               <template x-for="sk in (s.skills_used||[]).slice(0,3)" :key="sk">
                 <span class="bg-blue-50 text-blue-600 rounded px-1" x-text="sk"></span>
@@ -568,6 +749,18 @@
           </div>
         </div>
       </template>
+    </div>
+    <!-- loading / empty placeholders -->
+    <div x-show="historyLoading && historySessions.length === 0" class="px-5 py-10 text-center text-sm text-gray-400">
+      <svg class="animate-spin h-5 w-5 mx-auto mb-2 text-indigo-400" viewBox="0 0 24 24" fill="none">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+      </svg>
+      Building session index (tokens, cost, tools)…<br>
+      <span class="text-xs text-gray-300">first load over hundreds of transcripts can take a few seconds</span>
+    </div>
+    <div x-show="!historyLoading && historySessions.length === 0" class="px-5 py-10 text-center text-sm text-gray-400">
+      No sessions found.
     </div>
     <div class="px-5 py-2 border-t flex items-center justify-between text-xs text-gray-500"
          x-show="historyTotal > historyLimit">
@@ -606,6 +799,11 @@ function fleet() {
     toasts: [],
     evtSource: null,
     historySessions: [],
+    historyLoading: false,
+    historySort: 'recency',
+    historyPlatforms: [],
+    historySkills: [],
+    facetSkills: [],
     historyTotal: 0,
     historyPage: 1,
     historyLimit: 20,
@@ -614,6 +812,8 @@ function fleet() {
     skillsList: null,
     showMemory: false,
     memoryData: null,
+    showInsights: false,
+    insights: null,
     reviewStatuses: {},
     reviewVerdicts: {},
     memoryDetail: null,
@@ -675,6 +875,27 @@ function fleet() {
       if (seconds < 60) return seconds + 's ago';
       if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
       return Math.floor(seconds / 3600) + 'h ago';
+    },
+
+    fmtTokens(n) {
+      if (!n) return '';
+      if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B tok';
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M tok';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k tok';
+      return n + ' tok';
+    },
+    fmtDur(sec) {
+      if (!sec) return '';
+      if (sec < 60) return sec + 's';
+      if (sec < 3600) return Math.round(sec / 60) + 'm';
+      return (sec / 3600).toFixed(1) + 'h';
+    },
+    topTool(m) {
+      const t = m?.tools;
+      if (!t) return '';
+      let best = '', n = 0;
+      for (const k in t) { if (t[k] > n) { n = t[k]; best = k; } }
+      return best ? `${best}·${n}` : '';
     },
 
     async focusWindow(pid) {
@@ -762,6 +983,13 @@ function fleet() {
       this.toast(failLabel + ': ' + (d.error || ''));
     },
 
+    // Live-card timeline: codex sessions have no pid-keyed transcript endpoint,
+    // so route them through the session_id history timeline instead.
+    cardTimeline(w) {
+      if (w.platform === 'codex') this.openHistoryTimeline(w.session_id);
+      else this.toggleExpand(w.pid);
+    },
+
     async toggleExpand(pid) {
       if (this.expandedPid === pid) {
         this.expandedPid = null; this.timelineData = null; this.planData = null;
@@ -801,12 +1029,47 @@ function fleet() {
 
     async loadHistory(page) {
       if (page < 1) return;
-      const q = this.historyQuery ? `&q=${encodeURIComponent(this.historyQuery)}` : '';
-      const r = await fetch(`/api/history?page=${page}&limit=${this.historyLimit}${q}`);
-      const d = await r.json();
-      this.historySessions = d.sessions || [];
-      this.historyTotal = d.total || 0;
-      this.historyPage = d.page || 1;
+      // The first load (or a big limit) rebuilds the index over hundreds of
+      // transcripts and can take several seconds — flag it so the UI shows a
+      // spinner instead of looking frozen/broken.
+      this.historyLoading = true;
+      try {
+        const params = new URLSearchParams({ page, limit: this.historyLimit, sort: this.historySort });
+        if (this.historyQuery) params.set('q', this.historyQuery);
+        if (this.historyPlatforms.length) params.set('platforms', this.historyPlatforms.join(','));
+        if (this.historySkills.length) params.set('skills', this.historySkills.join(','));
+        const r = await fetch(`/api/history?${params}`);
+        const d = await r.json();
+        this.historySessions = d.sessions || [];
+        this.historyTotal = d.total || 0;
+        this.historyPage = d.page || 1;
+        if (!this.facetSkills.length) this.loadFacetSkills();
+      } catch (e) {
+        this.toast('History load failed: ' + e);
+      } finally {
+        this.historyLoading = false;
+      }
+    },
+
+    togglePlatform(p) {
+      const i = this.historyPlatforms.indexOf(p);
+      if (i >= 0) this.historyPlatforms.splice(i, 1); else this.historyPlatforms.push(p);
+      this.loadHistory(1);
+    },
+    toggleSkill(name) {
+      const i = this.historySkills.indexOf(name);
+      if (i >= 0) this.historySkills.splice(i, 1); else this.historySkills.push(name);
+      this.loadHistory(1);
+    },
+    async loadFacetSkills() {
+      try {
+        const r = await fetch('/api/skills');
+        const d = await r.json();
+        this.facetSkills = (d.skills || [])
+          .map(s => ({ name: s.name, count: s.session_count || 0 }))
+          .filter(s => s.count > 0)
+          .sort((a, b) => b.count - a.count).slice(0, 8);
+      } catch (e) { /* facets are optional */ }
     },
 
     async openHistoryTimeline(sessionId) {
@@ -976,6 +1239,16 @@ function fleet() {
       const r = await fetch('/api/memory');
       const d = await r.json();
       this.memoryData = d;
+    },
+
+    async loadInsights() {
+      this.insights = null;
+      const r = await fetch('/api/insights');
+      this.insights = await r.json();
+    },
+    barPct(v, max) {
+      if (!max || !v) return 0;
+      return Math.max(2, Math.round((v / max) * 100));
     },
 
     toast(msg) {

@@ -113,13 +113,39 @@ def _shell_args(command: str) -> list[str]:
     return [_user_shell(), "-lc", command]
 
 
+def _keepalive_script(command: str) -> str:
+    """A .command body that runs `command` WITHOUT exec and holds the window open
+    if it exits too fast to read.
+
+    The old body was `exec <shell> -lc <cmd>`: exec replaced the shell, so when
+    the CLI died the terminal had nothing left and closed instantly. A failed
+    resume (`claude --resume <id>` → "No conversation found", which exits 0) thus
+    flash-closed before the error could be read. Without exec, and with a sub-3s
+    guard, any quick exit leaves the message on screen behind a paused prompt.
+    Genuine interactive sessions run far longer than 3s, so they close normally.
+    """
+    inner = shlex.join(_shell_args(command))
+    return (
+        "#!/bin/bash\n"
+        "start=$SECONDS\n"
+        f"{inner}\n"
+        "code=$?\n"
+        'if [ $(($SECONDS - start)) -lt 3 ]; then\n'
+        '  echo\n'
+        '  echo "[claude-fleet] command exited ($code) immediately — see above."\n'
+        '  echo "Press Enter to close this window."\n'
+        '  read -r\n'
+        "fi\n"
+    )
+
+
 def _macos_terminal_command(command: str, cwd: str) -> Optional[list[str]]:
     if not IS_MAC or not shutil.which("open"):
         return None
     # Write a throwaway .command script and open it via LaunchServices. Prefer
     # iTerm if installed, else Terminal.app. No osascript → no Automation prompt.
     script = Path(tempfile.gettempdir()) / f"claude-fleet-{uuid.uuid4().hex}.command"
-    script.write_text(f"#!/bin/bash\nexec {shlex.join(_shell_args(command))}\n", encoding="utf-8")
+    script.write_text(_keepalive_script(command), encoding="utf-8")
     script.chmod(0o700)
     app = "iTerm" if Path("/Applications/iTerm.app").exists() else "Terminal"
     return ["open", "-a", app, str(script)]

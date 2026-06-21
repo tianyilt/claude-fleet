@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -22,18 +23,38 @@ TRIAGE_PRIORITY = {
 _BG_KEYWORDS = re.compile(r"等待|等.*通知|后台|background|polling|monitor|run_in_background", re.IGNORECASE)
 
 
+# Cache by (mtime, size): this is the only whole-file read in classify(), and the
+# 2s poll calls classify() on every live window. An idle window re-uses the cached
+# result and does zero I/O; only an actively-written transcript is re-read.
+_last_info_cache: dict[str, tuple[int, int, Optional[dict]]] = {}
+
+
 def _last_assistant_info(transcript_path: str) -> Optional[dict]:
     """Extract stop_reason, last content block type, and background task status."""
     p = Path(transcript_path)
-    if not p.exists():
+    try:
+        st = p.stat()
+    except OSError:
         return None
-    lines: list[str] = []
+    mtime, size = int(st.st_mtime * 1000), st.st_size
+    cached = _last_info_cache.get(transcript_path)
+    if cached and cached[0] == mtime and cached[1] == size:
+        return cached[2]
+
+    # Only the last 40 lines matter — keep a bounded window instead of reading the
+    # whole (possibly tens-of-MB) transcript into memory.
     try:
         with p.open() as f:
-            for line in f:
-                lines.append(line)
+            lines: list[str] = list(deque(f, maxlen=40))
     except Exception:
         return None
+
+    info = _compute_last_assistant_info(lines)
+    _last_info_cache[transcript_path] = (mtime, size, info)
+    return info
+
+
+def _compute_last_assistant_info(lines: list[str]) -> Optional[dict]:
 
     # Check for active background tasks: only queue-operations AFTER the
     # last assistant end_turn count. If the session moved on past the bg
@@ -92,6 +113,14 @@ def _last_assistant_info(transcript_path: str) -> Optional[dict]:
         "last_tool": last_tool,
         "has_pending_background": has_pending_background,
     }
+
+
+def prune_last_info_cache(live_paths) -> None:
+    """Keep the last-assistant cache bounded to currently-live transcripts."""
+    keep = {str(p) for p in live_paths if p}
+    for tp in list(_last_info_cache.keys()):
+        if tp not in keep:
+            _last_info_cache.pop(tp, None)
 
 
 def classify(window_dict: dict) -> dict:
