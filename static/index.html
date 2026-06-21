@@ -56,6 +56,10 @@
             :class="statusFilter==='completed' || statusFilter==='closeable' ? 'ring-2 ring-gray-400' : ''"
             @click="statusFilter = (statusFilter==='completed' ? 'closeable' : statusFilter==='closeable' ? '' : 'completed')"
             x-text="counts.idle + ' idle'"></span>
+      <span x-show="counts.headless > 0"
+            class="bg-yellow-50 text-yellow-700 px-2 py-0.5 rounded-full"
+            :title="counts.headless + ' headless session(s) with no terminal — find them in History below'"
+            x-text="counts.headless + ' headless ↓'"></span>
     </div>
     <!-- Skills / Memory buttons -->
     <button @click="showSkills = !showSkills; if(showSkills) loadSkills()"
@@ -374,9 +378,6 @@
             <span class="font-semibold text-sm truncate" x-text="w.name || w.first_input || w.project_name"></span>
             <span x-show="w.platform === 'codex'"
                   class="text-[10px] px-1.5 rounded text-white shrink-0 bg-green-500">codex</span>
-            <span x-show="w.alive && !w.tty"
-                  class="text-[10px] px-1.5 rounded shrink-0 bg-yellow-100 text-yellow-700"
-                  title="no controlling terminal (IDE/SDK session) — can't be focused">headless</span>
             <span class="text-[10px] px-1.5 rounded-full text-white shrink-0" :class="'triage-' + w.triage"
                   x-text="w.triage"></span>
           </div>
@@ -703,8 +704,12 @@
               <span class="px-1 rounded text-white text-[10px]"
                     :class="s.platform==='codex' ? 'bg-green-500' : s.platform==='opencode' ? 'bg-orange-500' : 'bg-blue-500'"
                     x-text="s.platform || 'claude'"></span>
-              <span class="font-medium text-gray-800 truncate" x-text="s.first_input?.slice(0,80) || s.session_id.slice(0,8)"></span>
+              <span x-show="s.plan_title" class="px-1 rounded bg-purple-100 text-purple-700 text-[10px] shrink-0" title="title from this session's plan">plan</span>
+              <!-- prefer the plan's title (describes the goal) over a raw first prompt -->
+              <span class="font-medium text-gray-800 truncate" x-text="s.plan_title || s.first_input?.slice(0,80) || s.session_id.slice(0,8)"></span>
             </div>
+            <!-- keep the original prompt as a muted subtitle when a plan title replaced it -->
+            <div x-show="s.plan_title && s.first_input" class="text-xs text-gray-400 truncate mt-0.5" x-text="'↳ ' + s.first_input?.slice(0,90)"></div>
             <div class="flex items-center gap-3 text-xs text-gray-400 mt-0.5 flex-wrap">
               <span x-text="s.project_name"></span>
               <span x-show="s.model" class="text-gray-400" x-text="s.model?.split('/').pop()?.split('-').slice(0,3).join('-')"></span>

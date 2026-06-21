@@ -55,6 +55,7 @@ class HistorySession:
     skill_breakdown: dict = field(default_factory=dict)
     memory_breakdown: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
+    plan_title: str = ""
 
 
 _cache: list[HistorySession] = []
@@ -181,11 +182,12 @@ def _enrich_transcript(tp: str, mtime: int, size: int) -> dict:
     cached = _enrich_cache.get(tp)
     if cached and cached[0] == mtime and cached[1] == size:
         return cached[2]
-    from .transcripts import extract_memory_ops, count_skill_activity, count_memory_activity
+    from .transcripts import extract_memory_ops, count_skill_activity, count_memory_activity, plan_title
     from .metrics import claude_metrics
     path = Path(tp)
     sa = count_skill_activity(tp)
     enrichment = {
+        "plan_title": plan_title(path),
         "first_input": _extract_first_user_text(path),
         "skills": _extract_skills_from_transcript(path),
         "mem_ops": extract_memory_ops(tp),
@@ -235,6 +237,7 @@ def _build_index() -> list[HistorySession]:
         skill_breakdown = {}
         memory_breakdown = {}
         metrics = {}
+        plan_title = ""
         if tp:
             enr = _enrich_transcript(tp, t.get("mtime", 0), t.get("size", 0))
             if not first_input:
@@ -245,6 +248,7 @@ def _build_index() -> list[HistorySession]:
             skill_breakdown = enr["skill_breakdown"]
             memory_breakdown = enr["memory_breakdown"]
             metrics = enr.get("metrics", {})
+            plan_title = enr.get("plan_title") or ""
 
         sessions.append(HistorySession(
             session_id=sid,
@@ -265,6 +269,7 @@ def _build_index() -> list[HistorySession]:
             skill_breakdown=skill_breakdown,
             memory_breakdown=memory_breakdown,
             metrics=metrics,
+            plan_title=plan_title,
         ))
 
     # Merge Codex sessions

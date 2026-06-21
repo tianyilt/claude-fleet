@@ -108,9 +108,23 @@ def _enriched_snapshot() -> dict:
             cw.setdefault("memory_ops", [])
             cw.setdefault("background_tasks", [])
             snap["windows"].append(cw)
-        snap["counts"]["total"] = len(snap["windows"])
     except Exception as e:
         print(f"[snapshot] codex windows error: {e}")
+    # The live board is for focusable terminal sessions. Headless/detached
+    # sessions (no controlling tty — IDE/SDK-spawned claude, or a codex whose
+    # terminal has since closed) can't be focused and just clutter the board;
+    # they remain discoverable in the History list below. Filter them out and
+    # recompute counts on the visible set.
+    headless = sum(1 for w in snap["windows"] if not w.get("tty"))
+    snap["windows"] = [w for w in snap["windows"] if w.get("tty")]
+    snap["counts"] = {
+        "total": len(snap["windows"]),
+        "busy": sum(1 for w in snap["windows"] if w.get("status") == "busy"),
+        "waiting": sum(1 for w in snap["windows"] if w.get("status") == "waiting"),
+        "idle": sum(1 for w in snap["windows"]
+                    if w.get("status") not in ("busy", "waiting")),
+        "headless": headless,
+    }
     # Keep the per-window caches bounded to the transcripts that are actually live.
     live_tps = [w.get("transcript_path") for w in snap["windows"]]
     transcripts.prune_window_enrich_cache(live_tps)
