@@ -43,6 +43,12 @@
 <header class="px-6 py-3 border-b bg-white flex items-center justify-between">
   <div class="flex items-center gap-3">
     <h1 class="text-xl font-bold tracking-tight">Claude Fleet</h1>
+    <span class="text-[11px] px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0"
+          :class="sseStale ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-600'"
+          :title="sseStale ? 'live updates stalled — reconnecting' : 'receiving live updates'">
+      <span class="inline-block w-1.5 h-1.5 rounded-full" :class="sseStale ? 'bg-amber-500' : 'bg-emerald-500 pulse-red'"></span>
+      <span x-text="sseStale ? 'reconnecting…' : 'live'"></span>
+    </span>
     <div class="flex gap-1 text-xs">
       <span class="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full cursor-pointer hover:bg-emerald-200"
             :class="statusFilter==='working' ? 'ring-2 ring-emerald-500' : ''"
@@ -803,6 +809,8 @@ function fleet() {
     planData: null,
     toasts: [],
     evtSource: null,
+    lastEventAt: Date.now(),
+    sseStale: false,
     historySessions: [],
     historyLoading: false,
     historySort: 'recency',
@@ -843,22 +851,33 @@ function fleet() {
       // ?snapshot renders a one-shot static view (no live SSE) — handy for
       // embeds and for headless screenshots.
       if (!new URLSearchParams(location.search).has('snapshot')) {
-        this.evtSource = new EventSource('/api/events');
-        this.evtSource.addEventListener('snapshot', (e) => {
-          this.applySnapshot(JSON.parse(e.data));
-        });
-        this.evtSource.onerror = () => {
-          setTimeout(() => {
-            if (this.evtSource) this.evtSource.close();
-            this.evtSource = new EventSource('/api/events');
-            this.evtSource.addEventListener('snapshot', (e) => {
-              this.applySnapshot(JSON.parse(e.data));
-            });
-          }, 5000);
-        };
+        this._connectSSE();
+        // Watchdog: the server sends a snapshot on change + a heartbeat every 10s,
+        // so going >25s without ANY event means the stream silently stalled
+        // (sleep/wake, proxy, dropped server) — force a reconnect and flag stale
+        // so the board never sits showing a frozen (e.g. old red) state.
+        setInterval(() => {
+          const gap = (Date.now() - this.lastEventAt) / 1000;
+          this.sseStale = gap > 25;
+          if (gap > 25) this._connectSSE();
+        }, 3000);
       }
       this._applyHashRoute();
       window.addEventListener('hashchange', () => this._applyHashRoute());
+    },
+
+    _connectSSE() {
+      try { if (this.evtSource) this.evtSource.close(); } catch (e) {}
+      const es = new EventSource('/api/events');
+      this.evtSource = es;
+      es.addEventListener('snapshot', (e) => {
+        this.lastEventAt = Date.now(); this.sseStale = false;
+        this.applySnapshot(JSON.parse(e.data));
+      });
+      es.addEventListener('heartbeat', () => {
+        this.lastEventAt = Date.now(); this.sseStale = false;
+      });
+      es.onerror = () => { this.sseStale = true; };
     },
 
     // Deep-link panels via URL hash: #skills, #memory, #search=<q>, #timeline=<sid>

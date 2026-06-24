@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -36,6 +37,7 @@ class State:
         # while idle) keep refreshing their "Xm ago" without per-second churn.
         return tuple(
             (w["pid"], w["status"], w["waiting_for"], w["updated_at"],
+             w.get("triage"), bool(w.get("permission_msg")),
              w.get("idle_seconds", 0) // 30)
             for w in snap["windows"]
         )
@@ -47,15 +49,30 @@ state = State()
 # session_id -> first user message (immutable per session; avoids a per-poll read).
 _first_input_cache: dict[str, str] = {}
 
+# Serializes snapshot building: the watcher runs it in a threadpool while
+# api_windows / the SSE initial-send may call it on the request thread; the shared
+# enrichment caches aren't safe under concurrent build, so only one runs at a time.
+_snapshot_lock = threading.Lock()
+
 
 def _enriched_snapshot() -> dict:
+    with _snapshot_lock:
+        return _build_enriched_snapshot()
+
+
+def _build_enriched_snapshot() -> dict:
     snap = sessions.snapshot()
+    # Fresh "needs approval" events only (not stale, not "waiting for input").
     perm_by_tty = perms.pending_by_tty()
     for w in snap["windows"]:
         w["platform"] = "claude"
         tty = w.get("tty")
-        if tty and tty in perm_by_tty:
-            ev = perm_by_tty[tty]
+        ev = perm_by_tty.get(tty) if tty else None
+        # A session is actually BLOCKED only if the approval prompt is at/after its
+        # last activity — once the user approves, the transcript advances and
+        # updated_at jumps past the event, self-clearing the alert.
+        blocked = bool(ev and ev.epoch >= (w.get("updated_at", 0) / 1000) - 5)
+        if blocked:
             w["permission_msg"] = ev.msg
             w["permission_ts"] = ev.raw_ts
         else:
@@ -84,10 +101,18 @@ def _enriched_snapshot() -> dict:
             w["skills_used"] = []
             w["memory_ops"] = []
             w["background_tasks"] = []
-        tri = patrol.classify(w)
-        w["triage"] = tri["triage"]
-        w["triage_reason"] = tri["reason"]
-        w["triage_suggestion"] = tri["suggestion"]
+        if blocked:
+            # Claude Code's session.json never writes status=="waiting", so the
+            # focus-log approval event is the real signal — surface it as the red
+            # alert instead of mislabeling a blocked session "completed".
+            w["triage"] = "waiting_perm"
+            w["triage_reason"] = ev.msg
+            w["triage_suggestion"] = "去终端批准"
+        else:
+            tri = patrol.classify(w)
+            w["triage"] = tri["triage"]
+            w["triage_reason"] = tri["reason"]
+            w["triage_suggestion"] = tri["suggestion"]
     # Codex writes no pid registry, so running codex tasks are invisible to
     # sessions.list_windows(). Detect them separately and render as live cards.
     # Their transcripts are a different format, so skip the Claude-specific
@@ -617,9 +642,11 @@ async def api_events(request: Request) -> EventSourceResponse:
                 if await request.is_disconnected():
                     break
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=20.0)
+                    payload = await asyncio.wait_for(queue.get(), timeout=10.0)
                     yield {"event": "snapshot", "data": payload}
                 except asyncio.TimeoutError:
+                    # Liveness ping so the client can tell a quiet (no-change)
+                    # stream apart from a dead one and reconnect on real stalls.
                     yield {"event": "heartbeat", "data": str(int(time.time()))}
         finally:
             state.subscribers.discard(queue)
