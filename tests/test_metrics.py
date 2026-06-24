@@ -138,3 +138,46 @@ def test_build_insights_empty():
     ins = insights.build_insights([])
     assert ins["totals"]["sessions"] == 0
     assert ins["by_model"] == [] and ins["tools"] == []
+
+
+def _sess_with_requests(sid, first_ts, requests, model="claude-opus-4-8"):
+    # requests: list of (rid, input, output, cache_read, cache_creation)
+    total = sum(ti + to + tcr + tcc for _, ti, to, tcr, tcc in requests)
+    return {
+        "session_id": sid, "platform": "claude", "project_name": "p",
+        "model": model, "first_ts": first_ts, "last_ts": first_ts,
+        "metrics": {"tokens": {"total": total}, "cost_usd": 1.0,
+                    "duration_sec": 0, "turns": 0, "tools": {}, "files": [],
+                    "model": model, "requests": requests},
+    }
+
+
+def test_insights_dedups_forked_requests():
+    # session B (fork) copies A's request r1 and adds its own r2.
+    A = _sess_with_requests("A", "2026-06-01T10:00:00Z",
+                            [("r1", 1000, 100, 5000, 0)])
+    B = _sess_with_requests("B", "2026-06-02T10:00:00Z",
+                            [("r1", 1000, 100, 5000, 0), ("r2", 200, 50, 0, 0)])
+    ins = insights.build_insights([B, A])   # unsorted input; build sorts oldest-first
+    t = ins["totals"]
+    # deduped token total counts r1 once + r2 once
+    assert t["tokens_total"] == (1000 + 100 + 5000) + (200 + 50)
+    # naive double-counts r1
+    assert t["tokens_total_naive"] == (6100) + (6100 + 250)
+    assert t["dup_tokens"] == 6100
+    # r1 attributed to the earlier session A; B (the fork) only keeps r2
+    cost_rows = {r["session_id"]: r for r in ins["leaderboards"]["tokens"]}
+    assert cost_rows["A"]["tokens"] == 6100
+    assert cost_rows["B"]["tokens"] == 250
+
+
+def test_claude_metrics_emits_request_ledger(tmp_path):
+    f = tmp_path / "c.jsonl"
+    _write(f, [
+        {"type": "assistant", "requestId": "req-1",
+         "message": {"model": "claude-opus-4-8", "usage": {
+             "input_tokens": 10, "output_tokens": 5,
+             "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0}}},
+    ])
+    m = metrics.claude_metrics(f)
+    assert m["requests"] == [("req-1", 10, 5, 100, 0)]

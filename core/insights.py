@@ -26,11 +26,22 @@ def _top(counter: dict, n: int) -> list[dict]:
 
 
 def build_insights(sessions: list[dict]) -> dict:
-    """Aggregate a list of history-session dicts (each with a `metrics` block)."""
+    """Aggregate a list of history-session dicts (each with a `metrics` block).
+
+    Cost/token totals are DEDUPED by requestId across the whole set: forks copy the
+    parent's transcript prefix, so the same API requests appear in several sessions.
+    Each request is attributed to the EARLIEST session that holds it (oldest
+    first_ts), so a long fork chain is billed once, not once per fork.
+    """
+    from . import metrics as _metrics
+
     n_claude = n_codex = 0
     tok_claude = tok_codex = 0
-    total_cost = 0.0
+    total_cost = 0.0          # deduped
+    total_cost_naive = 0.0    # sum of per-session standalone cost (for the savings note)
+    tok_total_naive = 0
     total_duration = 0
+    seen_requests: set = set()   # requestIds already attributed to an earlier session
 
     by_model: dict[str, dict] = defaultdict(lambda: {"sessions": 0, "tokens": 0, "cost": 0.0})
     by_project: dict[str, dict] = defaultdict(lambda: {"sessions": 0, "tokens": 0, "cost": 0.0})
@@ -42,14 +53,37 @@ def build_insights(sessions: list[dict]) -> dict:
 
     rows: list[dict] = []  # flat rows for leaderboards
 
+    # Oldest first so the original session owns shared requests; forks keep only
+    # the new work they added.
+    sessions = sorted(sessions, key=lambda s: s.get("first_ts") or s.get("last_ts") or "")
+
     for s in sessions:
         m = s.get("metrics") or {}
         plat = s.get("platform", "claude")
-        toks = (m.get("tokens") or {}).get("total", 0) or 0
-        cost = m.get("cost_usd") or 0.0
-        dur = m.get("duration_sec") or 0
         model = (m.get("model") or s.get("model") or "unknown") or "unknown"
         proj = s.get("project_name") or "—"
+        dur = m.get("duration_sec") or 0
+
+        naive_toks = (m.get("tokens") or {}).get("total", 0) or 0
+        naive_cost = m.get("cost_usd") or 0.0
+        tok_total_naive += naive_toks
+        total_cost_naive += naive_cost
+
+        # Deduped tokens/cost for this session = only requests not seen earlier.
+        ledger = m.get("requests")
+        if ledger is not None:
+            toks = 0
+            cost = 0.0
+            for rid, ti, to, tcr, tcc in ledger:
+                if rid in seen_requests:
+                    continue
+                seen_requests.add(rid)
+                toks += ti + to + tcr + tcc
+                cost += _metrics.request_cost(ti, to, tcr, tcc, model)
+        else:
+            # codex / no ledger: nothing to dedup
+            toks = naive_toks
+            cost = naive_cost
 
         if plat == "codex":
             n_codex += 1
@@ -122,6 +156,9 @@ def build_insights(sessions: list[dict]) -> dict:
             "tokens_codex": tok_codex,
             "tokens_total": tok_claude + tok_codex,
             "cost_usd": round(total_cost, 2),
+            "cost_usd_naive": round(total_cost_naive, 2),
+            "tokens_total_naive": tok_total_naive,
+            "dup_tokens": max(0, tok_total_naive - (tok_claude + tok_codex)),
             "duration_sec": total_duration,
         },
         "by_model": _model_rows(),

@@ -53,8 +53,17 @@ def cost_usd(tokens: dict, model: str) -> Optional[float]:
          + tokens.get("output", 0) * r["output"]
          + tokens.get("cache_read", 0) * r["cache_read"]
          + tokens.get("cache_creation", 0) * r["cache_write"]) / 1_000_000.0,
-        4,
+        6,
     )
+
+
+def request_cost(inp: int, out: int, cr: int, cc: int, model: str) -> float:
+    """$ for a single API request; 0 if the model is unpriced (e.g. codex)."""
+    r = _rates(model or "")
+    if not r:
+        return 0.0
+    return (inp * r["input"] + out * r["output"]
+            + cr * r["cache_read"] + cc * r["cache_write"]) / 1_000_000.0
 
 
 def _empty_tokens() -> dict:
@@ -89,6 +98,10 @@ def claude_metrics(path: str | Path) -> dict:
     errors = 0
     model = ""
     first_ts = last_ts = ""
+    # per-API-request ledger keyed by requestId — lets the Insights page dedup the
+    # shared prefix that forks (--fork-session / fork-at-node) copy into the new
+    # transcript, so a long fork chain isn't billed several times over.
+    req_ledger: dict[str, tuple] = {}
 
     for d in _iter_lines(Path(path)):
         ts = d.get("timestamp", "")
@@ -104,10 +117,17 @@ def claude_metrics(path: str | Path) -> dict:
             if msg.get("model"):
                 model = msg["model"]
             u = msg.get("usage") or {}
-            tokens["input"] += u.get("input_tokens", 0) or 0
-            tokens["output"] += u.get("output_tokens", 0) or 0
-            tokens["cache_read"] += u.get("cache_read_input_tokens", 0) or 0
-            tokens["cache_creation"] += u.get("cache_creation_input_tokens", 0) or 0
+            ti = u.get("input_tokens", 0) or 0
+            to = u.get("output_tokens", 0) or 0
+            tcr = u.get("cache_read_input_tokens", 0) or 0
+            tcc = u.get("cache_creation_input_tokens", 0) or 0
+            tokens["input"] += ti
+            tokens["output"] += to
+            tokens["cache_read"] += tcr
+            tokens["cache_creation"] += tcc
+            rid = d.get("requestId") or msg.get("id")
+            if rid and rid not in req_ledger:
+                req_ledger[rid] = (ti, to, tcr, tcc)
             if msg.get("stop_reason") == "max_tokens":
                 errors += 1
             for b in (msg.get("content") or []):
@@ -141,4 +161,7 @@ def claude_metrics(path: str | Path) -> dict:
         "errors": errors,
         "cost_usd": cost_usd(tokens, model),
         "model": model,
+        # [(requestId, input, output, cache_read, cache_creation), ...] — internal,
+        # stripped from the /api/history payload; used only for global dedup.
+        "requests": [(rid, *vals) for rid, vals in req_ledger.items()],
     }

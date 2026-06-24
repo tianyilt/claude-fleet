@@ -354,11 +354,17 @@ def api_insights() -> dict:
 @app.get("/api/history")
 def api_history(q: str = "", page: int = 1, limit: int = 30,
                 platforms: str = "", skills: str = "", sort: str = "recency") -> dict:
-    return history.list_sessions(
+    data = history.list_sessions(
         q=q or None, page=page, limit=limit, sort=sort,
         platforms=[p for p in platforms.split(",") if p] or None,
         skills=[s for s in skills.split(",") if s] or None,
     )
+    # The per-request ledger is internal (used only for Insights dedup) — drop it
+    # from the row payload to keep it small.
+    for s in data.get("sessions", []):
+        if isinstance(s.get("metrics"), dict):
+            s["metrics"].pop("requests", None)
+    return data
 
 
 @app.get("/api/history/{session_id}/timeline")

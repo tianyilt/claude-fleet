@@ -113,9 +113,12 @@
           <div class="text-[10px] text-indigo-400 uppercase tracking-wide">Tokens</div>
           <div class="text-sm font-semibold text-indigo-700" x-text="fmtTokens(insights?.totals?.tokens_total)"></div>
         </div>
-        <div class="bg-emerald-50 rounded-lg p-2">
-          <div class="text-[10px] text-emerald-500 uppercase tracking-wide">Claude $ (est)</div>
+        <div class="bg-emerald-50 rounded-lg p-2"
+             :title="'deduped by requestId — forks/resumes share history. naive sum: $'+(insights?.totals?.cost_usd_naive||0).toLocaleString()">
+          <div class="text-[10px] text-emerald-500 uppercase tracking-wide">Claude $ (deduped)</div>
           <div class="text-sm font-semibold text-emerald-700" x-text="'$'+(insights?.totals?.cost_usd||0).toLocaleString()"></div>
+          <div x-show="insights?.totals?.cost_usd_naive > insights?.totals?.cost_usd"
+               class="text-[9px] text-gray-400 line-through" x-text="'$'+(insights?.totals?.cost_usd_naive||0).toLocaleString()"></div>
         </div>
         <div class="bg-gray-50 rounded-lg p-2">
           <div class="text-[10px] text-gray-400 uppercase tracking-wide">Active time</div>
