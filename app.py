@@ -351,6 +351,14 @@ def api_insights() -> dict:
     return insights.build_insights(data["sessions"])
 
 
+@app.get("/api/forks")
+def api_forks() -> dict:
+    """Fork lineage: family trees of sessions, ranked so the most-reused 'mother'
+    sessions (most descendants) surface first."""
+    data = history.list_sessions(limit=99999)
+    return insights.fork_forest(data["sessions"])
+
+
 @app.get("/api/history")
 def api_history(q: str = "", page: int = 1, limit: int = 30,
                 platforms: str = "", skills: str = "", sort: str = "recency") -> dict:

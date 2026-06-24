@@ -171,6 +171,28 @@ def test_insights_dedups_forked_requests():
     assert cost_rows["B"]["tokens"] == 250
 
 
+def test_fork_forest_builds_chain():
+    # A (root) → B (fork, copies r1) → C (fork of B, copies r1+r2)
+    A = _sess_with_requests("A", "2026-06-01T00:00:00Z", [("r1", 100, 10, 0, 0)])
+    B = _sess_with_requests("B", "2026-06-02T00:00:00Z",
+                            [("r1", 100, 10, 0, 0), ("r2", 50, 5, 0, 0)])
+    C = _sess_with_requests("C", "2026-06-03T00:00:00Z",
+                            [("r1", 100, 10, 0, 0), ("r2", 50, 5, 0, 0), ("r3", 20, 2, 0, 0)])
+    standalone = _sess_with_requests("D", "2026-06-04T00:00:00Z", [("rx", 1, 1, 0, 0)])
+    f = insights.fork_forest([C, A, B, standalone])
+    assert f["family_count"] == 1 and f["forked_sessions"] == 2
+    root = f["families"][0]
+    assert root["session_id"] == "A" and root["descendants"] == 2
+    b = root["children"][0]
+    assert b["session_id"] == "B"
+    assert b["children"][0]["session_id"] == "C"   # chain A→B→C reconstructed
+
+
+def test_fork_forest_no_forks():
+    s = _sess_with_requests("solo", "2026-06-01T00:00:00Z", [("r1", 1, 1, 0, 0)])
+    assert insights.fork_forest([s])["families"] == []
+
+
 def test_claude_metrics_emits_request_ledger(tmp_path):
     f = tmp_path / "c.jsonl"
     _write(f, [

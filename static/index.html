@@ -213,6 +213,28 @@
           </template>
         </div>
       </div>
+
+      <!-- Fork families: find the most-reused 'mother' sessions -->
+      <div x-show="forks?.families?.length" class="border-t pt-3">
+        <div class="text-xs font-semibold text-gray-500 mb-1">
+          Fork families · mother sessions
+          <span class="text-gray-400 font-normal" x-text="'(' + (forks?.family_count||0) + ' families, ' + (forks?.forked_sessions||0) + ' forks)'"></span>
+        </div>
+        <div class="space-y-0.5">
+          <template x-for="n in flattenForks(forks?.families)" :key="n.session_id">
+            <div class="flex items-center gap-2 text-xs py-0.5 hover:bg-gray-50 cursor-pointer rounded"
+                 :style="`padding-left:${n.depth * 18}px`"
+                 @click="openHistoryTimeline(n.session_id); showInsights=false">
+              <span class="text-gray-300" x-show="n.depth > 0">↳</span>
+              <span class="px-1 rounded text-white text-[9px] shrink-0" :class="n.platform==='codex'?'bg-green-500':'bg-blue-500'" x-text="n.platform"></span>
+              <span class="truncate text-gray-700 flex-1" x-text="n.title"></span>
+              <span x-show="n.descendants > 0" class="text-purple-600 font-medium shrink-0" :title="n.descendants + ' descendant fork(s)'" x-text="'⑂' + n.descendants"></span>
+              <span class="text-emerald-600 shrink-0" x-show="n.owned_cost" x-text="'$'+n.owned_cost"></span>
+              <span class="text-gray-400 shrink-0 w-20 text-right" x-show="n.descendants > 0" :title="'total $ of this session + all its forks (deduped)'" x-text="'Σ$'+n.subtree_cost"></span>
+            </div>
+          </template>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -830,6 +852,7 @@ function fleet() {
     memoryData: null,
     showInsights: false,
     insights: null,
+    forks: null,
     reviewStatuses: {},
     reviewVerdicts: {},
     memoryDetail: null,
@@ -1270,12 +1293,24 @@ function fleet() {
 
     async loadInsights() {
       this.insights = null;
+      this.forks = null;
       const r = await fetch('/api/insights');
       this.insights = await r.json();
+      fetch('/api/forks').then(r => r.json()).then(d => { this.forks = d; });
     },
     barPct(v, max) {
       if (!max || !v) return 0;
       return Math.max(2, Math.round((v / max) * 100));
+    },
+    // Flatten a fork family tree into indented rows for rendering.
+    flattenForks(families) {
+      const out = [];
+      const walk = (n, depth) => {
+        out.push({ ...n, depth });
+        (n.children || []).forEach(c => walk(c, depth + 1));
+      };
+      (families || []).forEach(f => walk(f, 0));
+      return out;
     },
 
     toast(msg) {

@@ -25,6 +25,98 @@ def _top(counter: dict, n: int) -> list[dict]:
             for k, v in sorted(counter.items(), key=lambda x: -x[1])[:n]]
 
 
+def _session_title(s: dict) -> str:
+    return (s.get("plan_title")
+            or (s.get("first_input") or "")[:70]
+            or s.get("session_id", "")[:8])
+
+
+def fork_forest(sessions: list[dict], top: int = 20) -> dict:
+    """Reconstruct the fork lineage from the per-request ledgers.
+
+    A fork copies its parent's transcript prefix, so the copied requestIds are
+    "inherited". A session's parent is the owner (earliest holder) of the LAST
+    request it inherited — which is exactly the fork point's predecessor, so this
+    handles multi-level chains (A→B→C). Returns the family trees that actually
+    have forks, ranked so the most-reused "mother" sessions surface first.
+    """
+    from . import metrics as _metrics
+
+    ordered = sorted(sessions, key=lambda s: s.get("first_ts") or s.get("last_ts") or "")
+    owner: dict[str, str] = {}        # requestId -> earliest session_id
+    node: dict[str, dict] = {}
+
+    for s in ordered:
+        sid = s.get("session_id", "")
+        if not sid or sid in node:
+            continue
+        m = s.get("metrics") or {}
+        model = m.get("model") or "unknown"
+        reqs = m.get("requests") or []
+        owned_cost = 0.0
+        owned_tokens = 0
+        parent = None
+        for rid, ti, to, tcr, tcc in reqs:
+            if rid in owner:
+                parent = owner[rid]          # last inherited wins → immediate parent
+            else:
+                owner[rid] = sid
+                owned_cost += _metrics.request_cost(ti, to, tcr, tcc, model)
+                owned_tokens += ti + to + tcr + tcc
+        node[sid] = {
+            "session_id": sid,
+            "title": _session_title(s),
+            "project": s.get("project_name"),
+            "platform": s.get("platform", "claude"),
+            "first_ts": s.get("first_ts", ""),
+            "parent": parent if (parent and parent != sid) else None,
+            "children": [],
+            "owned_cost": round(owned_cost, 2),
+            "owned_tokens": owned_tokens,
+        }
+
+    for sid, n in node.items():
+        if n["parent"] and n["parent"] in node:
+            node[n["parent"]]["children"].append(sid)
+
+    def subtree(sid: str) -> tuple:
+        n = node[sid]
+        cnt = 0
+        cost = n["owned_cost"]
+        for c in n["children"]:
+            ccnt, ccost = subtree(c)
+            cnt += 1 + ccnt
+            cost += ccost
+        n["descendants"] = cnt
+        n["subtree_cost"] = round(cost, 2)
+        return cnt, cost
+
+    for sid, n in node.items():
+        if not n["parent"]:
+            subtree(sid)
+
+    def as_tree(sid: str) -> dict:
+        n = node[sid]
+        return {
+            "session_id": sid, "title": n["title"], "project": n["project"],
+            "platform": n["platform"], "first_ts": n["first_ts"],
+            "owned_cost": n["owned_cost"], "descendants": n.get("descendants", 0),
+            "subtree_cost": n.get("subtree_cost", n["owned_cost"]),
+            "children": [as_tree(c) for c in sorted(
+                n["children"], key=lambda c: node[c].get("first_ts") or "")],
+        }
+
+    # Family roots that actually branched, ranked by how much descends from them.
+    roots = [n for n in node.values()
+             if not n["parent"] and n.get("descendants", 0) > 0]
+    roots.sort(key=lambda n: (-n.get("descendants", 0), -n.get("subtree_cost", 0)))
+    return {
+        "families": [as_tree(n["session_id"]) for n in roots[:top]],
+        "family_count": len(roots),
+        "forked_sessions": sum(1 for n in node.values() if n["parent"]),
+    }
+
+
 def build_insights(sessions: list[dict]) -> dict:
     """Aggregate a list of history-session dicts (each with a `metrics` block).
 
