@@ -74,7 +74,8 @@ def test_codex_window_neutral_when_unconfirmed(monkeypatch):
     w = ws[0]
     assert w["pid"] == 1 and w["tty"] == "/dev/ttys1"          # visible + focusable
     assert w["transcript_path"] is None                        # honest: no identity
-    assert w["session_id"] == "codex-pid-1" and w["name"] == "codex · x"
+    assert w["idle_seconds"] is None                            # no bogus "0s ago"
+    assert w["session_id"] == "codex-pid-1" and w["name"] == "codex @ ttys1"  # ID by terminal
 
 
 def test_codex_windows_one_card_per_pid_same_cwd(monkeypatch):

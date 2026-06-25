@@ -412,7 +412,8 @@ _win_cache: dict = {"pids": None, "windows": [], "ts": 0.0}
 _WIN_CACHE_TTL = 2.0
 
 
-def _codex_window(pid: int, tty, cwd, cs, now_ms: int) -> dict:
+def _codex_window(pid: int, tty, cwd, cs, now_ms: int, active: bool) -> dict:
+    # `active` = the process has its rollout open right now (i.e. generating).
     if cs is not None:
         return {
             "pid": pid, "session_id": cs.session_id, "cwd": cwd or cs.project,
@@ -422,20 +423,22 @@ def _codex_window(pid: int, tty, cwd, cs, now_ms: int) -> dict:
             "started_at": cs.transcript_mtime, "updated_at": cs.transcript_mtime,
             "version": cs.cli_version, "tty": tty,
             "transcript_path": cs.transcript_path, "alive": True,
-            "platform": "codex", "model": cs.model,
+            "platform": "codex", "model": cs.model, "active": active,
             "idle_seconds": max(0, int((now_ms - cs.transcript_mtime) / 1000)),
         }
     # Identity not yet confirmed (idle at a prompt, never caught mid-turn). Show a
-    # NEUTRAL card — never a guessed/stale title — still focusable via its tty.
-    base = (cwd or "").rsplit("/", 1)[-1] or "~"
+    # NEUTRAL card keyed by its terminal so it's identifiable + focusable — never a
+    # guessed title. idle_seconds=None so the UI doesn't show a bogus "0s ago".
+    ttyname = (tty or "").rsplit("/", 1)[-1] or "?"
     return {
         "pid": pid, "session_id": f"codex-pid-{pid}", "cwd": cwd or "",
-        "project_name": base, "project_slug": "",
-        "name": f"codex · {base}", "first_input": "",
+        "project_name": ttyname, "project_slug": "",
+        "name": f"codex @ {ttyname}", "first_input": "",
         "status": "running", "waiting_for": None,
         "started_at": now_ms, "updated_at": now_ms, "version": "",
         "tty": tty, "transcript_path": None, "alive": True,
-        "platform": "codex", "model": "", "idle_seconds": 0,
+        "platform": "codex", "model": "", "active": active,
+        "idle_seconds": None,
     }
 
 
@@ -472,7 +475,8 @@ def list_codex_windows() -> list[dict]:
             _pid_rollout[pid] = open_rollout      # confirmed: this is its session
         path = _pid_rollout.get(pid)
         cs = _build_codex_session(Path(path)) if path else None
-        windows.append(_codex_window(pid, get_tty(pid), cwd, cs, now_ms))
+        windows.append(_codex_window(pid, get_tty(pid), cwd, cs, now_ms,
+                                     active=bool(open_rollout)))
     for dead in [p for p in _pid_rollout if p not in set(pids)]:
         _pid_rollout.pop(dead, None)
 

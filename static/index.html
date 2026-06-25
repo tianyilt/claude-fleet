@@ -15,6 +15,7 @@
   .triage-stalled { background-color: #f59e0b; }
   .triage-completed { background-color: #3b82f6; }
   .triage-closeable { background-color: #9ca3af; }
+  .triage-idle { background-color: #cbd5e1; }
   pre { white-space: pre-wrap; word-break: break-all; }
   .toast-enter { animation: slideIn .3s ease-out; }
   @keyframes slideIn { from{transform:translateY(1rem);opacity:0} to{transform:translateY(0);opacity:1} }
@@ -442,7 +443,8 @@
             </template>
           </div>
           <div class="text-gray-400">
-            <span x-text="formatIdle(w.idle_seconds)"></span> ·
+            <span x-show="w.idle_seconds != null" x-text="formatIdle(w.idle_seconds)"></span>
+            <span x-show="w.idle_seconds != null"> · </span>
             pid <span x-text="w.pid"></span>
           </div>
         </div>
@@ -453,7 +455,8 @@
                   class="text-xs px-2 py-1 rounded border transition"
                   :class="w.triage === 'waiting_perm' ? 'border-red-300 text-red-600 hover:bg-red-50 font-medium' : 'border-gray-200 text-gray-600 hover:bg-gray-100'">
             Focus</button>
-          <button @click="cardTimeline(w)"
+          <!-- No transcript to show for an unidentified codex terminal → hide Timeline. -->
+          <button x-show="w.transcript_path || w.platform !== 'codex'" @click="cardTimeline(w)"
                   class="text-xs border border-gray-200 text-gray-600 px-2 py-1 rounded hover:bg-gray-100 transition">
             Timeline</button>
           <button x-show="w.platform !== 'codex' && (w.triage === 'completed' || w.triage === 'stalled')"
@@ -1046,9 +1049,12 @@ function fleet() {
       this.toast(failLabel + ': ' + (d.error || ''));
     },
 
-    // Live-card timeline: codex sessions have no pid-keyed transcript endpoint,
-    // so route them through the session_id history timeline instead.
+    // Live-card click: codex sessions have no pid-keyed transcript endpoint, so
+    // route them through the session_id history timeline — unless the codex
+    // session is unidentified (no transcript), in which case Focus is the only
+    // sensible action (clicking used to hit a dead "No transcript" timeline).
     cardTimeline(w) {
+      if (w.platform === 'codex' && !w.transcript_path) return this.focusWindow(w.pid);
       if (w.platform === 'codex') this.openHistoryTimeline(w.session_id);
       else this.toggleExpand(w.pid);
     },

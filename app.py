@@ -124,10 +124,15 @@ def _build_enriched_snapshot() -> dict:
             cw.setdefault("permission_ts", None)
             tp = cw.get("transcript_path")
             cw["current_task"] = codex.codex_current_task(tp) if tp else None
-            # Idle past the threshold with the transcript settled → likely done;
-            # otherwise it's actively working. (No stop_reason in codex rollouts.)
-            cw["triage"] = "completed" if idle > patrol.IDLE_THRESHOLD else "working"
-            cw["triage_reason"] = "codex · idle" if idle > patrol.IDLE_THRESHOLD else "codex · active"
+            # Honest state: "working" (green) ONLY while the process is actually
+            # generating (rollout open via lsof). Otherwise it's an open terminal
+            # sitting idle at a prompt — show a calm "idle", never a fake "working".
+            if cw.get("active"):
+                cw["triage"] = "working"
+                cw["triage_reason"] = "codex · generating"
+            else:
+                cw["triage"] = "idle"
+                cw["triage_reason"] = "codex · open (idle)"
             cw["triage_suggestion"] = ""
             cw.setdefault("skills_used", [])
             cw.setdefault("memory_ops", [])
