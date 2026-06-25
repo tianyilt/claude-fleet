@@ -62,32 +62,29 @@ def test_codex_window_real_identity_when_lsof_confirms(monkeypatch):
     assert w["name"] == "play slay the spire" and w["transcript_path"] == "/open.jsonl"
 
 
-def test_codex_window_neutral_when_unconfirmed(monkeypatch):
-    # No rollout open (idle at a prompt) → neutral card, NOT a fabricated old title.
+def test_codex_window_hidden_when_unidentified(monkeypatch):
+    # No rollout open and never confirmed → NOT shown (avoids a useless grey card).
     codex._win_cache.update(pids=None, windows=[], ts=0.0)
     codex._pid_rollout.clear()
     monkeypatch.setattr(codex, "_running_codex_pids", lambda: [1])
     monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/Users/x", None))
     monkeypatch.setattr("core.sessions.get_tty", lambda pid: "/dev/ttys1")
-    ws = codex.list_codex_windows()
-    assert len(ws) == 1
-    w = ws[0]
-    assert w["pid"] == 1 and w["tty"] == "/dev/ttys1"          # visible + focusable
-    assert w["transcript_path"] is None                        # honest: no identity
-    assert w["idle_seconds"] is None                            # no bogus "0s ago"
-    assert w["session_id"] == "codex-pid-1" and w["name"] == "codex @ ttys1"  # ID by terminal
+    assert codex.list_codex_windows() == []
 
 
-def test_codex_windows_one_card_per_pid_same_cwd(monkeypatch):
-    # Two open codex terminals in the SAME cwd → two cards, never collapsed.
+def test_codex_windows_one_card_per_identified_pid_same_cwd(monkeypatch):
+    # Two identified codex terminals in the SAME cwd → two cards, never collapsed.
     codex._win_cache.update(pids=None, windows=[], ts=0.0)
     codex._pid_rollout.clear()
     monkeypatch.setattr(codex, "_running_codex_pids", lambda: [100, 200])
-    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/work", None))
+    monkeypatch.setattr(codex, "_pid_files",
+                        lambda pid: ("/work", f"/r{pid}.jsonl"))
+    monkeypatch.setattr(codex, "_build_codex_session",
+                        lambda f: _mk_cs(f"sid-{f.name}", str(f)))
     monkeypatch.setattr("core.sessions.get_tty", lambda pid: f"/dev/ttys{pid}")
     ws = codex.list_codex_windows()
     assert len(ws) == 2 and {w["pid"] for w in ws} == {100, 200}
-    assert all(w["tty"] for w in ws)
+    assert len({w["session_id"] for w in ws}) == 2 and all(w["tty"] for w in ws)
 
 
 def test_codex_window_persists_confirmed_identity_across_idle(monkeypatch):

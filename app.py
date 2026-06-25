@@ -38,7 +38,7 @@ class State:
         return tuple(
             (w["pid"], w["status"], w["waiting_for"], w["updated_at"],
              w.get("triage"), bool(w.get("permission_msg")),
-             w.get("idle_seconds", 0) // 30)
+             (w.get("idle_seconds") or 0) // 30)
             for w in snap["windows"]
         )
 
@@ -119,7 +119,7 @@ def _build_enriched_snapshot() -> dict:
     # enrichment (perms/triage/skills) and supply neutral defaults.
     try:
         for cw in codex.list_codex_windows():
-            idle = cw.get("idle_seconds", 0)
+            idle = cw.get("idle_seconds") or 0
             cw.setdefault("permission_msg", None)
             cw.setdefault("permission_ts", None)
             tp = cw.get("transcript_path")

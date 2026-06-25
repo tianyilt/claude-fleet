@@ -475,6 +475,12 @@ def list_codex_windows() -> list[dict]:
             _pid_rollout[pid] = open_rollout      # confirmed: this is its session
         path = _pid_rollout.get(pid)
         cs = _build_codex_session(Path(path)) if path else None
+        # Only show codex terminals we can actually identify (lsof confirmed the
+        # rollout, now or earlier). An unidentified one is just a grey "some codex
+        # is open" card with no useful info — clutter, so skip it. It'll appear the
+        # moment that session does a turn and we catch its rollout.
+        if cs is None:
+            continue
         windows.append(_codex_window(pid, get_tty(pid), cwd, cs, now_ms,
                                      active=bool(open_rollout)))
     for dead in [p for p in _pid_rollout if p not in set(pids)]:
