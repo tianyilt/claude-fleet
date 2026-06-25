@@ -46,9 +46,12 @@ def test_list_codex_windows_matches_pid_cwd(monkeypatch):
         transcript_path="/x.jsonl", transcript_size=1, transcript_mtime=1000,
         cli_version="1.0", model_provider="openai", model="gpt-5",
     )
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    codex._pid_rollout.clear()
     monkeypatch.setattr(codex, "list_codex_sessions", lambda: [cs])
     monkeypatch.setattr(codex, "_running_codex_pids", lambda: [4242])
-    monkeypatch.setattr(codex, "_pid_cwd", lambda pid: "/work/dir")
+    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/work/dir", None))
+    monkeypatch.setattr(codex, "_pid_start_epoch", lambda pid: 1.0)
     monkeypatch.setattr("core.sessions.get_tty", lambda pid: "/dev/ttys9")
 
     ws = codex.list_codex_windows()
@@ -60,21 +63,74 @@ def test_list_codex_windows_matches_pid_cwd(monkeypatch):
     assert w["name"] == "play slay the spire"
 
 
-def test_list_codex_windows_skips_unmatched_cwd(monkeypatch):
+def test_list_codex_windows_unmatched_cwd_still_shows_placeholder(monkeypatch):
+    # A running codex process whose cwd has no rollout match is STILL shown (so it's
+    # visible + focusable) — as a placeholder card, not dropped.
     cs = codex.CodexSession(
         session_id="sid-1", project="/work/dir", project_name="dir",
         first_input="x", first_ts="", last_ts="", transcript_path="/x.jsonl",
         transcript_size=1, transcript_mtime=1, cli_version="", model_provider="", model="",
     )
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    codex._pid_rollout.clear()
     monkeypatch.setattr(codex, "list_codex_sessions", lambda: [cs])
     monkeypatch.setattr(codex, "_running_codex_pids", lambda: [1])
-    monkeypatch.setattr(codex, "_pid_cwd", lambda pid: "/somewhere/else")
-    assert codex.list_codex_windows() == []
+    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/somewhere/else", None))
+    monkeypatch.setattr(codex, "_pid_start_epoch", lambda pid: 1.0)
+    monkeypatch.setattr("core.sessions.get_tty", lambda pid: "/dev/ttys1")
+    ws = codex.list_codex_windows()
+    assert len(ws) == 1 and ws[0]["pid"] == 1 and ws[0]["tty"] == "/dev/ttys1"
+    assert ws[0]["transcript_path"] is None        # placeholder (no rollout matched)
 
 
 def test_list_codex_windows_empty_when_no_process(monkeypatch):
     monkeypatch.setattr(codex, "_running_codex_pids", lambda: [])
     assert codex.list_codex_windows() == []
+
+
+def test_list_codex_windows_one_card_per_pid_same_cwd(monkeypatch):
+    # Two codex sessions in the SAME cwd → must NOT collapse to one card.
+    cs1 = codex.CodexSession(
+        session_id="sid-1", project="/work", project_name="work",
+        first_input="hi", first_ts="2026-06-01T10:00:00", last_ts="",
+        transcript_path="/r1.jsonl", transcript_size=1, transcript_mtime=2000,
+        cli_version="", model_provider="", model="gpt-5")
+    cs2 = codex.CodexSession(
+        session_id="sid-2", project="/work", project_name="work",
+        first_input="bye", first_ts="2026-06-01T11:00:00", last_ts="",
+        transcript_path="/r2.jsonl", transcript_size=1, transcript_mtime=1000,
+        cli_version="", model_provider="", model="gpt-5")
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    codex._pid_rollout.clear()
+    monkeypatch.setattr(codex, "list_codex_sessions", lambda: [cs1, cs2])
+    monkeypatch.setattr(codex, "_running_codex_pids", lambda: [100, 200])
+    # no open rollout caught via lsof; cwd resolves to /work for both
+    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/work", None))
+    # pid 200 started more recently than 100
+    monkeypatch.setattr(codex, "_pid_start_epoch", lambda pid: 200.0 if pid == 200 else 100.0)
+    monkeypatch.setattr("core.sessions.get_tty",
+                        lambda pid: f"/dev/ttys{pid}")
+    ws = codex.list_codex_windows()
+    assert len(ws) == 2                                  # one per pid, not collapsed
+    assert {w["pid"] for w in ws} == {100, 200}
+    assert {w["session_id"] for w in ws} == {"sid-1", "sid-2"}   # distinct rollouts
+    assert all(w["tty"] for w in ws)                     # each focusable
+
+
+def test_list_codex_windows_exact_match_via_open_rollout(monkeypatch):
+    cs = codex.CodexSession(
+        session_id="sid-A", project="/w", project_name="w", first_input="task",
+        first_ts="", last_ts="", transcript_path="/open.jsonl", transcript_size=1,
+        transcript_mtime=5, cli_version="", model_provider="", model="gpt-5")
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    codex._pid_rollout.clear()
+    monkeypatch.setattr(codex, "list_codex_sessions", lambda: [cs])
+    monkeypatch.setattr(codex, "_running_codex_pids", lambda: [7])
+    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/w", "/open.jsonl"))
+    monkeypatch.setattr(codex, "_pid_start_epoch", lambda pid: 1.0)
+    monkeypatch.setattr("core.sessions.get_tty", lambda pid: "/dev/ttys7")
+    ws = codex.list_codex_windows()
+    assert len(ws) == 1 and ws[0]["session_id"] == "sid-A" and ws[0]["tty"] == "/dev/ttys7"
 
 
 # ---------- Fix 1a: transcript_cwd recovers the real working directory ----------

@@ -207,7 +207,9 @@ app = FastAPI(title="Claude Fleet", lifespan=lifespan)
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     html = (STATIC_DIR / "index.html").read_text()
-    return HTMLResponse(html)
+    # Never let the browser serve a stale dashboard — always fetch the latest JS,
+    # so a refresh actually picks up new behavior (and the live-update logic).
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 @app.get("/api/windows")

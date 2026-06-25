@@ -878,15 +878,18 @@ function fleet() {
       // embeds and for headless screenshots.
       if (!new URLSearchParams(location.search).has('snapshot')) {
         this._connectSSE();
-        // Watchdog: the server sends a snapshot on change + a heartbeat every 10s,
-        // so going >25s without ANY event means the stream silently stalled
-        // (sleep/wake, proxy, dropped server) — force a reconnect and flag stale
-        // so the board never sits showing a frozen (e.g. old red) state.
+        // Polling fallback — the decisive fix for "the board doesn't update
+        // without a refresh". EventSource can silently fail to deliver in some
+        // browsers/proxies; /api/windows just returns the watcher's cached
+        // snapshot (cheap), so polling it every 3s keeps the board live no matter
+        // what SSE does. SSE still gives instant updates when it works.
+        setInterval(() => this._poll(), 3000);
+        // Watchdog: if NOTHING (SSE or poll) has refreshed for >25s, force-reconnect
+        // SSE and flag stale so the board never sits frozen.
         setInterval(() => {
-          const gap = (Date.now() - this.lastEventAt) / 1000;
-          this.sseStale = gap > 25;
-          if (gap > 25) this._connectSSE();
-        }, 3000);
+          this.sseStale = (Date.now() - this.lastEventAt) / 1000 > 25;
+          if (this.sseStale) this._connectSSE();
+        }, 5000);
       }
       this._applyHashRoute();
       window.addEventListener('hashchange', () => this._applyHashRoute());
@@ -904,6 +907,16 @@ function fleet() {
         this.lastEventAt = Date.now(); this.sseStale = false;
       });
       es.onerror = () => { this.sseStale = true; };
+    },
+
+    async _poll() {
+      try {
+        const r = await fetch('/api/windows', { cache: 'no-store' });
+        if (!r.ok) return;
+        this.applySnapshot(await r.json());
+        this.lastEventAt = Date.now();   // board is fresh (via poll), clear stale
+        this.sseStale = false;
+      } catch (e) { /* transient; watchdog handles persistent failure */ }
     },
 
     // Deep-link panels via URL hash: #skills, #memory, #search=<q>, #timeline=<sid>
