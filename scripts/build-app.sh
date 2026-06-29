@@ -49,7 +49,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Claude Fleet opens and focuses iTerm2 windows to resume your Claude Code sessions.</string>
+    <string>Claude Fleet opens and focuses terminal windows (Terminal.app / iTerm2) to resume your Claude Code sessions.</string>
 </dict>
 </plist>
 PLIST
@@ -144,5 +144,5 @@ if [ "$INSTALL" = "1" ]; then
     rm -rf "$DEST"
     cp -R "$APP" "$DEST"
     echo "[build-app] installed: $DEST"
-    echo "[build-app] First launch → click Resume → approve \"Claude Fleet wants to control iTerm.app\"."
+    echo "[build-app] First launch → click Resume → approve \"Claude Fleet wants to control <your terminal>\" (Terminal.app / iTerm2)."
 fi
