@@ -123,3 +123,16 @@ def test_fork_at_node_rejects_non_claude(monkeypatch):
 
 def test_export_endpoint_removed():
     assert client.post("/api/windows/123/export").status_code == 404
+
+
+def test_diff_signature_tolerates_none_idle():
+    # A neutral codex card has idle_seconds=None; diff_signature must not crash
+    # (a None // 30 here froze the whole watcher and broke all live updates).
+    snap = {"windows": [
+        {"pid": 1, "status": "running", "waiting_for": None, "updated_at": 0,
+         "triage": "idle", "permission_msg": None, "idle_seconds": None},
+        {"pid": 2, "status": "busy", "waiting_for": None, "updated_at": 5,
+         "triage": "working", "permission_msg": None, "idle_seconds": 12},
+    ]}
+    sig = app_module.state.diff_signature(snap)   # must not raise
+    assert len(sig) == 2

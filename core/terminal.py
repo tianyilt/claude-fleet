@@ -92,6 +92,15 @@ def session_cli_command(platform: str, session_id: str, cwd: str, fork: bool = F
     return f"cd {shlex.quote(cwd)} && {shlex.join(args)}"
 
 
+def remote_session_command(ssh: str, platform: str, session_id: str,
+                           cwd: str, fork: bool = False) -> str:
+    """Resume/fork a session on a remote host: open a LOCAL terminal that SSHes in
+    with a tty (-t) and runs the resume command there. `ssh` is the full prefix
+    (e.g. 'ssh -p 2222 user@host')."""
+    inner = session_cli_command(platform, session_id, cwd, fork=fork)
+    return f"{ssh} -t {shlex.quote(inner)}"
+
+
 def _configured_terminal_command(command: str, cwd: str) -> Optional[list[str]]:
     """User override, e.g. CLAUDE_FLEET_TERMINAL_CMD='tmux new-window -c {cwd} {cmd}'."""
     template = os.environ.get("CLAUDE_FLEET_TERMINAL_CMD", "").strip()
@@ -142,13 +151,15 @@ def _keepalive_script(command: str) -> str:
 def _macos_terminal_command(command: str, cwd: str) -> Optional[list[str]]:
     if not IS_MAC or not shutil.which("open"):
         return None
-    # Write a throwaway .command script and open it via LaunchServices. Prefer
-    # iTerm if installed, else Terminal.app. No osascript → no Automation prompt.
+    # Write a throwaway .command script and open it via LaunchServices in the
+    # user's DEFAULT terminal (whatever handles .command — Terminal.app by
+    # default, or iTerm2 / Warp if they set it). No `-a` so we don't force a
+    # particular app, and no osascript → no Automation prompt. To pin a specific
+    # terminal, set CLAUDE_FLEET_TERMINAL_CMD or change the .command default app.
     script = Path(tempfile.gettempdir()) / f"claude-fleet-{uuid.uuid4().hex}.command"
     script.write_text(_keepalive_script(command), encoding="utf-8")
     script.chmod(0o700)
-    app = "iTerm" if Path("/Applications/iTerm.app").exists() else "Terminal"
-    return ["open", "-a", app, str(script)]
+    return ["open", str(script)]
 
 
 def _linux_terminal_command(command: str, cwd: str) -> Optional[list[str]]:
@@ -180,15 +191,19 @@ def _terminal_command(command: str, cwd: str) -> Optional[list[str]]:
     )
 
 
-def launch_session(platform: str, session_id: str, cwd: str, fork: bool = False) -> dict:
+def launch_session(platform: str, session_id: str, cwd: str, fork: bool = False,
+                   ssh: Optional[str] = None) -> dict:
     """Launch an interactive CLI session in a real terminal when possible.
 
     Returns {ok: True, action, command, ...} on success, or {ok: False, command,
     error} when there's no launcher (the UI offers `command` for manual paste).
+    When `ssh` is given, the session lives on a remote host: open a local terminal
+    that SSHes in and resumes there.
     """
     cwd = cwd or str(Path.home())
     try:
-        command = session_cli_command(platform, session_id, cwd, fork=fork)
+        command = (remote_session_command(ssh, platform, session_id, cwd, fork=fork)
+                   if ssh else session_cli_command(platform, session_id, cwd, fork=fork))
     except ValueError as e:
         return {"ok": False, "error": str(e)}
 

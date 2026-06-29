@@ -37,39 +37,72 @@ def test_codex_first_input_falls_back_to_assistant(tmp_path):
     assert codex._extract_first_user_input(f) == "assistant only"
 
 
-# ---------- Fix 2a: list_codex_windows maps a live pid -> its rollout ----------
+# ---------- list_codex_windows: open windows, honest identity (lsof-confirmed) ----------
 
-def test_list_codex_windows_matches_pid_cwd(monkeypatch):
-    cs = codex.CodexSession(
-        session_id="sid-1", project="/work/dir", project_name="dir",
-        first_input="play slay the spire", first_ts="", last_ts="",
-        transcript_path="/x.jsonl", transcript_size=1, transcript_mtime=1000,
-        cli_version="1.0", model_provider="openai", model="gpt-5",
-    )
-    monkeypatch.setattr(codex, "list_codex_sessions", lambda: [cs])
+def _mk_cs(sid, path, first_input="task", cwd="/w"):
+    return codex.CodexSession(
+        session_id=sid, project=cwd, project_name=cwd.rsplit("/", 1)[-1],
+        first_input=first_input, first_ts="", last_ts="", transcript_path=path,
+        transcript_size=1, transcript_mtime=1000, cli_version="", model_provider="", model="gpt-5")
+
+
+def test_codex_window_real_identity_when_lsof_confirms(monkeypatch):
+    # lsof catches the rollout the process has open → card shows that real session.
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    codex._pid_rollout.clear()
     monkeypatch.setattr(codex, "_running_codex_pids", lambda: [4242])
-    monkeypatch.setattr(codex, "_pid_cwd", lambda pid: "/work/dir")
+    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/w", "/open.jsonl"))
+    monkeypatch.setattr(codex, "_build_codex_session",
+                        lambda f: _mk_cs("sid-A", str(f), "play slay the spire"))
     monkeypatch.setattr("core.sessions.get_tty", lambda pid: "/dev/ttys9")
-
     ws = codex.list_codex_windows()
     assert len(ws) == 1
     w = ws[0]
-    assert w["platform"] == "codex" and w["alive"] is True
-    assert w["pid"] == 4242 and w["session_id"] == "sid-1"
-    assert w["cwd"] == "/work/dir" and w["tty"] == "/dev/ttys9"
-    assert w["name"] == "play slay the spire"
+    assert w["pid"] == 4242 and w["session_id"] == "sid-A" and w["tty"] == "/dev/ttys9"
+    assert w["name"] == "play slay the spire" and w["transcript_path"] == "/open.jsonl"
 
 
-def test_list_codex_windows_skips_unmatched_cwd(monkeypatch):
-    cs = codex.CodexSession(
-        session_id="sid-1", project="/work/dir", project_name="dir",
-        first_input="x", first_ts="", last_ts="", transcript_path="/x.jsonl",
-        transcript_size=1, transcript_mtime=1, cli_version="", model_provider="", model="",
-    )
-    monkeypatch.setattr(codex, "list_codex_sessions", lambda: [cs])
+def test_codex_window_hidden_when_unidentified(monkeypatch):
+    # No rollout open and never confirmed → NOT shown (avoids a useless grey card).
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    codex._pid_rollout.clear()
     monkeypatch.setattr(codex, "_running_codex_pids", lambda: [1])
-    monkeypatch.setattr(codex, "_pid_cwd", lambda pid: "/somewhere/else")
+    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/Users/x", None))
+    monkeypatch.setattr("core.sessions.get_tty", lambda pid: "/dev/ttys1")
     assert codex.list_codex_windows() == []
+
+
+def test_codex_windows_one_card_per_identified_pid_same_cwd(monkeypatch):
+    # Two identified codex terminals in the SAME cwd → two cards, never collapsed.
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    codex._pid_rollout.clear()
+    monkeypatch.setattr(codex, "_running_codex_pids", lambda: [100, 200])
+    monkeypatch.setattr(codex, "_pid_files",
+                        lambda pid: ("/work", f"/r{pid}.jsonl"))
+    monkeypatch.setattr(codex, "_build_codex_session",
+                        lambda f: _mk_cs(f"sid-{f.name}", str(f)))
+    monkeypatch.setattr("core.sessions.get_tty", lambda pid: f"/dev/ttys{pid}")
+    ws = codex.list_codex_windows()
+    assert len(ws) == 2 and {w["pid"] for w in ws} == {100, 200}
+    assert len({w["session_id"] for w in ws}) == 2 and all(w["tty"] for w in ws)
+
+
+def test_codex_window_persists_confirmed_identity_across_idle(monkeypatch):
+    # Once lsof confirms a pid's rollout, it sticks even when later polls don't
+    # catch it open (the session went idle) — so identity doesn't flap to neutral.
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    codex._pid_rollout.clear()
+    monkeypatch.setattr(codex, "_running_codex_pids", lambda: [5])
+    monkeypatch.setattr(codex, "_build_codex_session", lambda f: _mk_cs("sid-X", str(f)))
+    monkeypatch.setattr("core.sessions.get_tty", lambda pid: "/dev/ttys5")
+    # poll 1: caught writing
+    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/w", "/r.jsonl"))
+    codex.list_codex_windows()
+    # poll 2: now idle (no open rollout) but cache expired
+    codex._win_cache.update(pids=None, windows=[], ts=0.0)
+    monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/w", None))
+    ws = codex.list_codex_windows()
+    assert ws[0]["session_id"] == "sid-X"        # remembered, not reverted to neutral
 
 
 def test_list_codex_windows_empty_when_no_process(monkeypatch):

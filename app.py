@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from core import actions, codex, history, insights, memory, patrol, perms, plans, search, sessions, share, skills, terminal, transcripts
+from core import actions, codex, history, insights, memory, patrol, perms, plans, remote, search, sessions, share, skills, terminal, transcripts
 
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
@@ -36,7 +37,8 @@ class State:
         # while idle) keep refreshing their "Xm ago" without per-second churn.
         return tuple(
             (w["pid"], w["status"], w["waiting_for"], w["updated_at"],
-             w.get("idle_seconds", 0) // 30)
+             w.get("triage"), bool(w.get("permission_msg")),
+             (w.get("idle_seconds") or 0) // 30)
             for w in snap["windows"]
         )
 
@@ -47,15 +49,30 @@ state = State()
 # session_id -> first user message (immutable per session; avoids a per-poll read).
 _first_input_cache: dict[str, str] = {}
 
+# Serializes snapshot building: the watcher runs it in a threadpool while
+# api_windows / the SSE initial-send may call it on the request thread; the shared
+# enrichment caches aren't safe under concurrent build, so only one runs at a time.
+_snapshot_lock = threading.Lock()
+
 
 def _enriched_snapshot() -> dict:
+    with _snapshot_lock:
+        return _build_enriched_snapshot()
+
+
+def _build_enriched_snapshot() -> dict:
     snap = sessions.snapshot()
+    # Fresh "needs approval" events only (not stale, not "waiting for input").
     perm_by_tty = perms.pending_by_tty()
     for w in snap["windows"]:
         w["platform"] = "claude"
         tty = w.get("tty")
-        if tty and tty in perm_by_tty:
-            ev = perm_by_tty[tty]
+        ev = perm_by_tty.get(tty) if tty else None
+        # A session is actually BLOCKED only if the approval prompt is at/after its
+        # last activity — once the user approves, the transcript advances and
+        # updated_at jumps past the event, self-clearing the alert.
+        blocked = bool(ev and ev.epoch >= (w.get("updated_at", 0) / 1000) - 5)
+        if blocked:
             w["permission_msg"] = ev.msg
             w["permission_ts"] = ev.raw_ts
         else:
@@ -84,33 +101,66 @@ def _enriched_snapshot() -> dict:
             w["skills_used"] = []
             w["memory_ops"] = []
             w["background_tasks"] = []
-        tri = patrol.classify(w)
-        w["triage"] = tri["triage"]
-        w["triage_reason"] = tri["reason"]
-        w["triage_suggestion"] = tri["suggestion"]
+        if blocked:
+            # Claude Code's session.json never writes status=="waiting", so the
+            # focus-log approval event is the real signal — surface it as the red
+            # alert instead of mislabeling a blocked session "completed".
+            w["triage"] = "waiting_perm"
+            w["triage_reason"] = ev.msg
+            w["triage_suggestion"] = "去终端批准"
+        else:
+            tri = patrol.classify(w)
+            w["triage"] = tri["triage"]
+            w["triage_reason"] = tri["reason"]
+            w["triage_suggestion"] = tri["suggestion"]
     # Codex writes no pid registry, so running codex tasks are invisible to
     # sessions.list_windows(). Detect them separately and render as live cards.
     # Their transcripts are a different format, so skip the Claude-specific
     # enrichment (perms/triage/skills) and supply neutral defaults.
     try:
         for cw in codex.list_codex_windows():
-            idle = cw.get("idle_seconds", 0)
+            idle = cw.get("idle_seconds") or 0
             cw.setdefault("permission_msg", None)
             cw.setdefault("permission_ts", None)
             tp = cw.get("transcript_path")
             cw["current_task"] = codex.codex_current_task(tp) if tp else None
-            # Idle past the threshold with the transcript settled → likely done;
-            # otherwise it's actively working. (No stop_reason in codex rollouts.)
-            cw["triage"] = "completed" if idle > patrol.IDLE_THRESHOLD else "working"
-            cw["triage_reason"] = "codex · idle" if idle > patrol.IDLE_THRESHOLD else "codex · active"
+            # Honest state: "working" (green) ONLY while the process is actually
+            # generating (rollout open via lsof). Otherwise it's an open terminal
+            # sitting idle at a prompt — show a calm "idle", never a fake "working".
+            if cw.get("active"):
+                cw["triage"] = "working"
+                cw["triage_reason"] = "codex · generating"
+            else:
+                cw["triage"] = "idle"
+                cw["triage_reason"] = "codex · open (idle)"
             cw["triage_suggestion"] = ""
             cw.setdefault("skills_used", [])
             cw.setdefault("memory_ops", [])
             cw.setdefault("background_tasks", [])
             snap["windows"].append(cw)
-        snap["counts"]["total"] = len(snap["windows"])
     except Exception as e:
         print(f"[snapshot] codex windows error: {e}")
+    # Registered remote servers (collected over SSH by the slow poller, cached).
+    try:
+        snap["windows"].extend(remote.cached_windows())
+    except Exception as e:
+        print(f"[snapshot] remote windows error: {e}")
+    # The live board is for focusable terminal sessions. Headless/detached LOCAL
+    # sessions (no controlling tty) can't be focused and just clutter the board;
+    # they stay in History. Remote windows have no LOCAL tty but are legit (you
+    # Resume them over SSH), so they're exempt from the tty filter.
+    headless = sum(1 for w in snap["windows"]
+                   if not w.get("tty") and w.get("source", "local") == "local")
+    snap["windows"] = [w for w in snap["windows"]
+                       if w.get("tty") or w.get("source", "local") != "local"]
+    snap["counts"] = {
+        "total": len(snap["windows"]),
+        "busy": sum(1 for w in snap["windows"] if w.get("status") == "busy"),
+        "waiting": sum(1 for w in snap["windows"] if w.get("status") == "waiting"),
+        "idle": sum(1 for w in snap["windows"]
+                    if w.get("status") not in ("busy", "waiting")),
+        "headless": headless,
+    }
     # Keep the per-window caches bounded to the transcripts that are actually live.
     live_tps = [w.get("transcript_path") for w in snap["windows"]]
     transcripts.prune_window_enrich_cache(live_tps)
@@ -151,13 +201,28 @@ async def _watcher() -> None:
         await asyncio.sleep(2)
 
 
+async def _remote_poller() -> None:
+    """Refresh registered remotes over SSH on a slow cadence (SSH is too costly for
+    the 2s watcher). Runs in a thread so blocking SSH never stalls the event loop."""
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            if remote.load_remotes():
+                await loop.run_in_executor(None, remote.poll_all)
+        except Exception as e:
+            print(f"[remote-poller] error: {e}")
+        await asyncio.sleep(25)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task = asyncio.create_task(_watcher())
+    rtask = asyncio.create_task(_remote_poller())
     try:
         yield
     finally:
         task.cancel()
+        rtask.cancel()
 
 
 app = FastAPI(title="Claude Fleet", lifespan=lifespan)
@@ -168,7 +233,9 @@ app = FastAPI(title="Claude Fleet", lifespan=lifespan)
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     html = (STATIC_DIR / "index.html").read_text()
-    return HTMLResponse(html)
+    # Never let the browser serve a stale dashboard — always fetch the latest JS,
+    # so a refresh actually picks up new behavior (and the live-update logic).
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 @app.get("/api/windows")
@@ -312,18 +379,74 @@ def api_insights() -> dict:
     return insights.build_insights(data["sessions"])
 
 
+@app.get("/api/forks")
+def api_forks() -> dict:
+    """Fork lineage: family trees of sessions, ranked so the most-reused 'mother'
+    sessions (most descendants) surface first."""
+    data = history.list_sessions(limit=99999)
+    return insights.fork_forest(data["sessions"])
+
+
+@app.get("/api/remotes")
+def api_remotes() -> dict:
+    """Registered remote servers + their last-poll status."""
+    return {"remotes": remote.status()}
+
+
+@app.post("/api/remotes")
+async def api_remotes_add(request: Request) -> dict:
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    ssh = (body.get("ssh") or "").strip()
+    if not name or not ssh:
+        return {"ok": False, "error": "name and ssh are both required"}
+    remote.add_remote(name, ssh)
+    # Kick an immediate collect so the UI shows it without waiting for the poller.
+    try:
+        await asyncio.get_event_loop().run_in_executor(None, remote.poll_all)
+    except Exception:
+        pass
+    return {"ok": True, "remotes": remote.status()}
+
+
+@app.delete("/api/remotes/{name}")
+def api_remotes_remove(name: str) -> dict:
+    remote.remove_remote(name)
+    return {"ok": True, "remotes": remote.status()}
+
+
 @app.get("/api/history")
 def api_history(q: str = "", page: int = 1, limit: int = 30,
                 platforms: str = "", skills: str = "", sort: str = "recency") -> dict:
-    return history.list_sessions(
+    data = history.list_sessions(
         q=q or None, page=page, limit=limit, sort=sort,
         platforms=[p for p in platforms.split(",") if p] or None,
         skills=[s for s in skills.split(",") if s] or None,
     )
+    # The per-request ledger is internal (used only for Insights dedup) — drop it
+    # from the row payload to keep it small.
+    for s in data.get("sessions", []):
+        if isinstance(s.get("metrics"), dict):
+            s["metrics"].pop("requests", None)
+    return data
 
 
 @app.get("/api/history/{session_id}/timeline")
-def api_history_timeline(session_id: str, limit: int = 2000) -> dict:
+def api_history_timeline(session_id: str, limit: int = 2000, source: str = "") -> dict:
+    # Remote session — its transcript lives on the registered server; SSH-cat it.
+    # Resolve first (before local FS scans) so a session_id collision with a local
+    # session can't shadow the remote one.
+    if source and source != "local":
+        rsess = _find_history_session(session_id, source)
+        if rsess and rsess.get("transcript_path"):
+            try:
+                events = remote.remote_timeline(source, rsess["transcript_path"],
+                                                rsess.get("platform", "codex"), limit=limit)
+                return {"session_id": session_id, "project_slug": source,
+                        "events": events, "platform": rsess.get("platform", "codex")}
+            except Exception as e:
+                raise HTTPException(502, f"remote transcript fetch failed: {e}")
+        raise HTTPException(404, "remote transcript not found")
     # Claude Code transcripts
     from core.sessions import PROJECTS_DIR
     for proj_dir in PROJECTS_DIR.iterdir():
@@ -355,53 +478,65 @@ def api_history_timeline(session_id: str, limit: int = 2000) -> dict:
             return {"session_id": session_id, "project_slug": "opencode", "events": events, "platform": "opencode"}
     except Exception:
         pass
+    # Remote session — its transcript lives on the registered server; SSH-cat it.
+    rsess = _find_history_session(session_id)
+    if rsess and rsess.get("source", "local") != "local" and rsess.get("transcript_path"):
+        try:
+            events = remote.remote_timeline(rsess["source"], rsess["transcript_path"],
+                                            rsess.get("platform", "codex"), limit=limit)
+            return {"session_id": session_id, "project_slug": rsess["source"],
+                    "events": events, "platform": rsess.get("platform", "codex")}
+        except Exception as e:
+            raise HTTPException(502, f"remote transcript fetch failed: {e}")
     raise HTTPException(404, "transcript not found")
 
 
-def _find_history_session(session_id: str) -> Optional[dict]:
-    """Return the indexed session dict for a session_id, or None."""
+def _find_history_session(session_id: str, source: str = "") -> Optional[dict]:
+    """Return the indexed session dict for a session_id (optionally a specific
+    source — local vs a remote server), or None."""
     data = history.list_sessions(limit=9999)
     for s in data["sessions"]:
-        if s["session_id"] == session_id:
+        if s["session_id"] == session_id and (not source or s.get("source", "local") == source):
             return s
     return None
 
 
-@app.post("/api/history/{session_id}/resume")
-def api_history_resume(session_id: str) -> dict:
-    sess = _find_history_session(session_id)
+def _resume_or_fork(session_id: str, source: str, fork: bool) -> dict:
+    sess = _find_history_session(session_id, source)
     if not sess:
         return {"ok": False, "error": "session not found in index"}
     platform = sess.get("platform", "claude")
     cwd = sess.get("project") or str(Path.home())
+    src = sess.get("source", "local")
+    if src != "local":
+        # Remote: open a local terminal that SSHes in and resumes there.
+        ssh = remote.ssh_for(src)
+        if not ssh:
+            return {"ok": False, "error": f"remote '{src}' is not registered"}
+        return terminal.launch_session(platform, session_id, cwd, fork=fork, ssh=ssh)
     if cwd and not Path(cwd).is_dir():
         return {"ok": False, "error": (
-            f"project directory not found: {cwd} — restore it or delete the session "
-            "(otherwise the terminal would open in the wrong place)")}
+            f"project directory not found: {cwd} — restore it or delete the session")}
     # If a live Claude session owns a tty, focus it instead of opening a duplicate.
-    if platform == "claude":
+    if not fork and platform == "claude":
         for w in sessions.list_windows():
             if w.session_id == session_id and w.alive and w.tty:
                 result = terminal.focus(w.tty)
                 if result.get("ok"):
                     return {"ok": True, "action": "focused",
                             "session_id": session_id, "pid": w.pid}
-                # focus failed (e.g. permission) — fall through to opening a window
                 break
-    return terminal.launch_session(platform, session_id, cwd, fork=False)
+    return terminal.launch_session(platform, session_id, cwd, fork=fork)
+
+
+@app.post("/api/history/{session_id}/resume")
+def api_history_resume(session_id: str, source: str = "") -> dict:
+    return _resume_or_fork(session_id, source, fork=False)
 
 
 @app.post("/api/history/{session_id}/fork")
-def api_history_fork(session_id: str) -> dict:
-    sess = _find_history_session(session_id)
-    if not sess:
-        return {"ok": False, "error": "session not found in index"}
-    platform = sess.get("platform", "claude")
-    cwd = sess.get("project") or str(Path.home())
-    if cwd and not Path(cwd).is_dir():
-        return {"ok": False, "error": (
-            f"project directory not found: {cwd} — restore it or delete the session")}
-    return terminal.launch_session(platform, session_id, cwd, fork=True)
+def api_history_fork(session_id: str, source: str = "") -> dict:
+    return _resume_or_fork(session_id, source, fork=True)
 
 
 @app.post("/api/history/{session_id}/fork-at-node")
@@ -603,9 +738,11 @@ async def api_events(request: Request) -> EventSourceResponse:
                 if await request.is_disconnected():
                     break
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=20.0)
+                    payload = await asyncio.wait_for(queue.get(), timeout=10.0)
                     yield {"event": "snapshot", "data": payload}
                 except asyncio.TimeoutError:
+                    # Liveness ping so the client can tell a quiet (no-change)
+                    # stream apart from a dead one and reconnect on real stalls.
                     yield {"event": "heartbeat", "data": str(int(time.time()))}
         finally:
             state.subscribers.discard(queue)

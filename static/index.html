@@ -15,6 +15,7 @@
   .triage-stalled { background-color: #f59e0b; }
   .triage-completed { background-color: #3b82f6; }
   .triage-closeable { background-color: #9ca3af; }
+  .triage-idle { background-color: #cbd5e1; }
   pre { white-space: pre-wrap; word-break: break-all; }
   .toast-enter { animation: slideIn .3s ease-out; }
   @keyframes slideIn { from{transform:translateY(1rem);opacity:0} to{transform:translateY(0);opacity:1} }
@@ -43,6 +44,12 @@
 <header class="px-6 py-3 border-b bg-white flex items-center justify-between">
   <div class="flex items-center gap-3">
     <h1 class="text-xl font-bold tracking-tight">Claude Fleet</h1>
+    <span class="text-[11px] px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0"
+          :class="sseStale ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-600'"
+          :title="sseStale ? 'live updates stalled — reconnecting' : 'receiving live updates'">
+      <span class="inline-block w-1.5 h-1.5 rounded-full" :class="sseStale ? 'bg-amber-500' : 'bg-emerald-500 pulse-red'"></span>
+      <span x-text="sseStale ? 'reconnecting…' : 'live'"></span>
+    </span>
     <div class="flex gap-1 text-xs">
       <span class="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full cursor-pointer hover:bg-emerald-200"
             :class="statusFilter==='working' ? 'ring-2 ring-emerald-500' : ''"
@@ -56,6 +63,10 @@
             :class="statusFilter==='completed' || statusFilter==='closeable' ? 'ring-2 ring-gray-400' : ''"
             @click="statusFilter = (statusFilter==='completed' ? 'closeable' : statusFilter==='closeable' ? '' : 'completed')"
             x-text="counts.idle + ' idle'"></span>
+      <span x-show="counts.headless > 0"
+            class="bg-yellow-50 text-yellow-700 px-2 py-0.5 rounded-full"
+            :title="counts.headless + ' headless session(s) with no terminal — find them in History below'"
+            x-text="counts.headless + ' headless ↓'"></span>
     </div>
     <!-- Skills / Memory buttons -->
     <button @click="showSkills = !showSkills; if(showSkills) loadSkills()"
@@ -70,6 +81,10 @@
             class="text-xs border px-2 py-1 rounded hover:bg-indigo-50 transition"
             :class="showInsights ? 'border-indigo-400 text-indigo-600 bg-indigo-50' : 'border-gray-200 text-gray-600'">
       Insights</button>
+    <button @click="showServers = !showServers; if(showServers) loadRemotes()"
+            class="text-xs border px-2 py-1 rounded hover:bg-teal-50 transition"
+            :class="showServers ? 'border-teal-400 text-teal-600 bg-teal-50' : 'border-gray-200 text-gray-600'">
+      Servers</button>
   </div>
   <div class="flex items-center gap-2">
     <input type="text" placeholder="Search..." x-model="searchQuery"
@@ -89,6 +104,33 @@
 
 <main class="px-6 py-4">
 
+  <!-- ===== Servers panel (remote SSH hosts) ===== -->
+  <div x-show="showServers" class="mb-4 bg-white rounded-xl shadow-sm border p-4" x-transition>
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold text-sm">Remote servers <span class="text-gray-400 font-normal">· their codex/claude sessions show on the board, tagged</span></h2>
+      <button @click="showServers = false" class="text-gray-400 hover:text-gray-700">&times;</button>
+    </div>
+    <div class="space-y-1 mb-3">
+      <template x-for="r in (remotes||[])" :key="r.name">
+        <div class="flex items-center gap-2 text-xs border rounded px-2 py-1.5">
+          <span class="inline-block w-2 h-2 rounded-full shrink-0" :class="r.ok ? 'bg-emerald-500' : 'bg-red-400'"></span>
+          <span class="font-medium text-gray-800 w-24 truncate" x-text="r.name"></span>
+          <span class="font-mono text-gray-500 flex-1 truncate" x-text="r.ssh"></span>
+          <span class="text-gray-400 shrink-0" x-show="r.ok" x-text="r.windows+' live · '+r.history+' hist'"></span>
+          <span class="text-red-500 shrink-0 truncate max-w-[16rem]" x-show="!r.ok" :title="r.error" x-text="r.error || 'unreachable'"></span>
+          <button @click="removeRemote(r.name)" class="text-gray-400 hover:text-red-600 shrink-0">remove</button>
+        </div>
+      </template>
+      <div x-show="!(remotes||[]).length" class="text-xs text-gray-400">No remote servers registered.</div>
+    </div>
+    <div class="flex items-center gap-2">
+      <input x-model="newRemoteName" placeholder="name (e.g. gpu-box)" class="border rounded px-2 py-1 text-xs w-32 focus:outline-none focus:ring-1 focus:ring-teal-400">
+      <input x-model="newRemoteSsh" placeholder="ssh command (e.g. ssh -p 2222 user@host)" @keydown.enter="addRemote()" class="border rounded px-2 py-1 text-xs flex-1 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400">
+      <button @click="addRemote()" class="text-xs border border-teal-300 text-teal-600 px-3 py-1 rounded hover:bg-teal-50">Add</button>
+    </div>
+    <div class="text-[11px] text-gray-400 mt-2">Stored locally in <code>~/.claude/fleet-remotes.json</code> (never committed). Remote needs <code>python3</code> + key-based SSH. Polled every ~25s.</div>
+  </div>
+
   <!-- ===== Insights panel ===== -->
   <div x-show="showInsights" class="mb-4 bg-white rounded-xl shadow-sm border p-4" x-transition>
     <div class="flex items-center justify-between mb-3">
@@ -103,9 +145,12 @@
           <div class="text-[10px] text-indigo-400 uppercase tracking-wide">Tokens</div>
           <div class="text-sm font-semibold text-indigo-700" x-text="fmtTokens(insights?.totals?.tokens_total)"></div>
         </div>
-        <div class="bg-emerald-50 rounded-lg p-2">
-          <div class="text-[10px] text-emerald-500 uppercase tracking-wide">Claude $ (est)</div>
+        <div class="bg-emerald-50 rounded-lg p-2"
+             :title="'deduped by requestId — forks/resumes share history. naive sum: $'+(insights?.totals?.cost_usd_naive||0).toLocaleString()">
+          <div class="text-[10px] text-emerald-500 uppercase tracking-wide">Claude $ (deduped)</div>
           <div class="text-sm font-semibold text-emerald-700" x-text="'$'+(insights?.totals?.cost_usd||0).toLocaleString()"></div>
+          <div x-show="insights?.totals?.cost_usd_naive > insights?.totals?.cost_usd"
+               class="text-[9px] text-gray-400 line-through" x-text="'$'+(insights?.totals?.cost_usd_naive||0).toLocaleString()"></div>
         </div>
         <div class="bg-gray-50 rounded-lg p-2">
           <div class="text-[10px] text-gray-400 uppercase tracking-wide">Active time</div>
@@ -196,6 +241,28 @@
             <div class="flex items-center gap-2 text-xs py-0.5">
               <span class="flex-1 truncate text-gray-600 font-mono text-[11px]" x-text="x.name" :title="x.name"></span>
               <span class="text-gray-500" x-text="x.count + '×'"></span>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Fork families: find the most-reused 'mother' sessions -->
+      <div x-show="forks?.families?.length" class="border-t pt-3">
+        <div class="text-xs font-semibold text-gray-500 mb-1">
+          Fork families · mother sessions
+          <span class="text-gray-400 font-normal" x-text="'(' + (forks?.family_count||0) + ' families, ' + (forks?.forked_sessions||0) + ' forks)'"></span>
+        </div>
+        <div class="space-y-0.5">
+          <template x-for="n in flattenForks(forks?.families)" :key="n.session_id">
+            <div class="flex items-center gap-2 text-xs py-0.5 hover:bg-gray-50 cursor-pointer rounded"
+                 :style="`padding-left:${n.depth * 18}px`"
+                 @click="openHistoryTimeline(n.session_id); showInsights=false">
+              <span class="text-gray-300" x-show="n.depth > 0">↳</span>
+              <span class="px-1 rounded text-white text-[9px] shrink-0" :class="n.platform==='codex'?'bg-green-500':'bg-blue-500'" x-text="n.platform"></span>
+              <span class="truncate text-gray-700 flex-1" x-text="n.title"></span>
+              <span x-show="n.descendants > 0" class="text-purple-600 font-medium shrink-0" :title="n.descendants + ' descendant fork(s)'" x-text="'⑂' + n.descendants"></span>
+              <span class="text-emerald-600 shrink-0" x-show="n.owned_cost" x-text="'$'+n.owned_cost"></span>
+              <span class="text-gray-400 shrink-0 w-20 text-right" x-show="n.descendants > 0" :title="'total $ of this session + all its forks (deduped)'" x-text="'Σ$'+n.subtree_cost"></span>
             </div>
           </template>
         </div>
@@ -374,9 +441,9 @@
             <span class="font-semibold text-sm truncate" x-text="w.name || w.first_input || w.project_name"></span>
             <span x-show="w.platform === 'codex'"
                   class="text-[10px] px-1.5 rounded text-white shrink-0 bg-green-500">codex</span>
-            <span x-show="w.alive && !w.tty"
-                  class="text-[10px] px-1.5 rounded shrink-0 bg-yellow-100 text-yellow-700"
-                  title="no controlling terminal (IDE/SDK session) — can't be focused">headless</span>
+            <span x-show="w.source && w.source !== 'local'"
+                  class="text-[10px] px-1.5 rounded shrink-0 bg-teal-100 text-teal-700"
+                  :title="'remote server: ' + w.source" x-text="'⮬ ' + w.source"></span>
             <span class="text-[10px] px-1.5 rounded-full text-white shrink-0" :class="'triage-' + w.triage"
                   x-text="w.triage"></span>
           </div>
@@ -410,7 +477,8 @@
             </template>
           </div>
           <div class="text-gray-400">
-            <span x-text="formatIdle(w.idle_seconds)"></span> ·
+            <span x-show="w.idle_seconds != null" x-text="formatIdle(w.idle_seconds)"></span>
+            <span x-show="w.idle_seconds != null"> · </span>
             pid <span x-text="w.pid"></span>
           </div>
         </div>
@@ -421,7 +489,13 @@
                   class="text-xs px-2 py-1 rounded border transition"
                   :class="w.triage === 'waiting_perm' ? 'border-red-300 text-red-600 hover:bg-red-50 font-medium' : 'border-gray-200 text-gray-600 hover:bg-gray-100'">
             Focus</button>
-          <button @click="cardTimeline(w)"
+          <!-- Remote sessions have no local tty to focus → Resume opens a local
+               terminal that SSHes in. -->
+          <button x-show="w.source && w.source !== 'local'" @click="resumeSession(w)"
+                  class="text-xs border border-teal-200 text-teal-600 px-2 py-1 rounded hover:bg-teal-50 transition">
+            Resume (ssh)</button>
+          <!-- No transcript to show for an unidentified codex terminal → hide Timeline. -->
+          <button x-show="w.transcript_path || w.platform !== 'codex'" @click="cardTimeline(w)"
                   class="text-xs border border-gray-200 text-gray-600 px-2 py-1 rounded hover:bg-gray-100 transition">
             Timeline</button>
           <button x-show="w.platform !== 'codex' && (w.triage === 'completed' || w.triage === 'stalled')"
@@ -693,9 +767,9 @@
       Building session index — first load over hundreds of transcripts can take a few seconds…
     </div>
     <div class="divide-y max-h-[28rem] overflow-y-auto" x-show="!historyLoading && historySessions.length > 0">
-      <template x-for="s in historySessions" :key="s.session_id">
+      <template x-for="s in historySessions" :key="(s.source||'local')+':'+s.session_id">
         <div class="px-5 py-3 hover:bg-gray-50 cursor-pointer flex items-start gap-3 text-sm"
-             @click="openHistoryTimeline(s.session_id)">
+             @click="openHistoryTimeline(s.session_id, s.source)">
           <span class="mt-1 inline-block w-2 h-2 rounded-full shrink-0"
                 :class="s.is_alive ? 'bg-emerald-500' : 'bg-gray-300'"></span>
           <div class="min-w-0 flex-1">
@@ -703,8 +777,14 @@
               <span class="px-1 rounded text-white text-[10px]"
                     :class="s.platform==='codex' ? 'bg-green-500' : s.platform==='opencode' ? 'bg-orange-500' : 'bg-blue-500'"
                     x-text="s.platform || 'claude'"></span>
-              <span class="font-medium text-gray-800 truncate" x-text="s.first_input?.slice(0,80) || s.session_id.slice(0,8)"></span>
+              <span x-show="s.source && s.source !== 'local'" class="px-1 rounded bg-teal-100 text-teal-700 text-[10px] shrink-0"
+                    :title="'remote server: ' + s.source" x-text="'⮬ ' + s.source"></span>
+              <span x-show="s.plan_title" class="px-1 rounded bg-purple-100 text-purple-700 text-[10px] shrink-0" title="title from this session's plan">plan</span>
+              <!-- prefer the plan's title (describes the goal) over a raw first prompt -->
+              <span class="font-medium text-gray-800 truncate" x-text="s.plan_title || s.first_input?.slice(0,80) || s.session_id.slice(0,8)"></span>
             </div>
+            <!-- keep the original prompt as a muted subtitle when a plan title replaced it -->
+            <div x-show="s.plan_title && s.first_input" class="text-xs text-gray-400 truncate mt-0.5" x-text="'↳ ' + s.first_input?.slice(0,90)"></div>
             <div class="flex items-center gap-3 text-xs text-gray-400 mt-0.5 flex-wrap">
               <span x-text="s.project_name"></span>
               <span x-show="s.model" class="text-gray-400" x-text="s.model?.split('/').pop()?.split('-').slice(0,3).join('-')"></span>
@@ -798,6 +878,8 @@ function fleet() {
     planData: null,
     toasts: [],
     evtSource: null,
+    lastEventAt: Date.now(),
+    sseStale: false,
     historySessions: [],
     historyLoading: false,
     historySort: 'recency',
@@ -814,6 +896,13 @@ function fleet() {
     memoryData: null,
     showInsights: false,
     insights: null,
+    forks: null,
+    showServers: false,
+    remotes: null,
+    newRemoteName: '',
+    newRemoteSsh: '',
+    remoteBusy: false,
+    remoteError: '',
     reviewStatuses: {},
     reviewVerdicts: {},
     memoryDetail: null,
@@ -838,22 +927,46 @@ function fleet() {
       // ?snapshot renders a one-shot static view (no live SSE) — handy for
       // embeds and for headless screenshots.
       if (!new URLSearchParams(location.search).has('snapshot')) {
-        this.evtSource = new EventSource('/api/events');
-        this.evtSource.addEventListener('snapshot', (e) => {
-          this.applySnapshot(JSON.parse(e.data));
-        });
-        this.evtSource.onerror = () => {
-          setTimeout(() => {
-            if (this.evtSource) this.evtSource.close();
-            this.evtSource = new EventSource('/api/events');
-            this.evtSource.addEventListener('snapshot', (e) => {
-              this.applySnapshot(JSON.parse(e.data));
-            });
-          }, 5000);
-        };
+        this._connectSSE();
+        // Polling fallback — the decisive fix for "the board doesn't update
+        // without a refresh". EventSource can silently fail to deliver in some
+        // browsers/proxies; /api/windows just returns the watcher's cached
+        // snapshot (cheap), so polling it every 3s keeps the board live no matter
+        // what SSE does. SSE still gives instant updates when it works.
+        setInterval(() => this._poll(), 3000);
+        // Watchdog: if NOTHING (SSE or poll) has refreshed for >25s, force-reconnect
+        // SSE and flag stale so the board never sits frozen.
+        setInterval(() => {
+          this.sseStale = (Date.now() - this.lastEventAt) / 1000 > 25;
+          if (this.sseStale) this._connectSSE();
+        }, 5000);
       }
       this._applyHashRoute();
       window.addEventListener('hashchange', () => this._applyHashRoute());
+    },
+
+    _connectSSE() {
+      try { if (this.evtSource) this.evtSource.close(); } catch (e) {}
+      const es = new EventSource('/api/events');
+      this.evtSource = es;
+      es.addEventListener('snapshot', (e) => {
+        this.lastEventAt = Date.now(); this.sseStale = false;
+        this.applySnapshot(JSON.parse(e.data));
+      });
+      es.addEventListener('heartbeat', () => {
+        this.lastEventAt = Date.now(); this.sseStale = false;
+      });
+      es.onerror = () => { this.sseStale = true; };
+    },
+
+    async _poll() {
+      try {
+        const r = await fetch('/api/windows', { cache: 'no-store' });
+        if (!r.ok) return;
+        this.applySnapshot(await r.json());
+        this.lastEventAt = Date.now();   // board is fresh (via poll), clear stale
+        this.sseStale = false;
+      } catch (e) { /* transient; watchdog handles persistent failure */ }
     },
 
     // Deep-link panels via URL hash: #skills, #memory, #search=<q>, #timeline=<sid>
@@ -861,6 +974,7 @@ function fleet() {
       const h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
       if (!h) return;
       if (h === 'skills') { this.showSkills = true; this.loadSkills(); }
+      else if (h === 'servers') { this.showServers = true; this.loadRemotes(); }
       else if (h === 'memory') { this.showMemory = true; this.loadMemory(); }
       else if (h.startsWith('search=')) { this.searchQuery = h.slice(7); this.doSearch(); }
       else if (h.startsWith('timeline=')) { this.openHistoryTimeline(h.slice(9)); }
@@ -983,10 +1097,15 @@ function fleet() {
       this.toast(failLabel + ': ' + (d.error || ''));
     },
 
-    // Live-card timeline: codex sessions have no pid-keyed transcript endpoint,
-    // so route them through the session_id history timeline instead.
+    // Live-card click: codex sessions have no pid-keyed transcript endpoint, so
+    // route them through the session_id history timeline — unless the codex
+    // session is unidentified (no transcript), in which case Focus is the only
+    // sensible action (clicking used to hit a dead "No transcript" timeline).
     cardTimeline(w) {
-      if (w.platform === 'codex') this.openHistoryTimeline(w.session_id);
+      if (w.platform === 'codex' && !w.transcript_path) return this.focusWindow(w.pid);
+      // Remote sessions have no local pid/transcript → always via history timeline.
+      if (w.platform === 'codex' || (w.source && w.source !== 'local'))
+        this.openHistoryTimeline(w.session_id, w.source);
       else this.toggleExpand(w.pid);
     },
 
@@ -1072,11 +1191,12 @@ function fleet() {
       } catch (e) { /* facets are optional */ }
     },
 
-    async openHistoryTimeline(sessionId) {
+    async openHistoryTimeline(sessionId, source = '') {
       this.expandedPid = null;
       this.expandedHistoryId = sessionId;
       this.planData = null;
-      const r = await fetch(`/api/history/${sessionId}/timeline`);
+      const q = source && source !== 'local' ? `?source=${encodeURIComponent(source)}` : '';
+      const r = await fetch(`/api/history/${sessionId}/timeline${q}`);
       if (r.ok) {
         this.timelineData = await r.json();
         this.$nextTick(() => this.$refs.timelinePanel?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
@@ -1087,15 +1207,52 @@ function fleet() {
     },
 
     async resumeSession(s) {
-      const r = await fetch(`/api/history/${s.session_id}/resume`, { method: 'POST' });
+      const q = s.source && s.source !== 'local' ? `?source=${encodeURIComponent(s.source)}` : '';
+      const r = await fetch(`/api/history/${s.session_id}/resume${q}`, { method: 'POST' });
       const d = await r.json();
       await this.termResult(d, d.action === 'focused' ? 'Focused existing window' : 'Resumed session', 'Resume failed');
     },
 
     async forkHistorySession(s) {
-      const r = await fetch(`/api/history/${s.session_id}/fork`, { method: 'POST' });
+      const q = s.source && s.source !== 'local' ? `?source=${encodeURIComponent(s.source)}` : '';
+      const r = await fetch(`/api/history/${s.session_id}/fork${q}`, { method: 'POST' });
       const d = await r.json();
       await this.termResult(d, 'Forked → new session (inherits history)', 'Fork failed');
+    },
+
+    async loadRemotes() {
+      try {
+        const r = await fetch('/api/remotes');
+        this.remotes = (await r.json()).remotes || [];
+      } catch (e) { this.remotes = []; this.remoteError = 'Failed to load servers'; }
+    },
+
+    async addRemote() {
+      const name = (this.newRemoteName || '').trim();
+      const ssh = (this.newRemoteSsh || '').trim();
+      this.remoteError = '';
+      if (!name || !ssh) { this.remoteError = 'Name and SSH command are required'; return; }
+      this.remoteBusy = true;
+      try {
+        const r = await fetch('/api/remotes', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, ssh }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.ok === false) { this.remoteError = d.error || 'Add failed'; return; }
+        this.newRemoteName = ''; this.newRemoteSsh = '';
+        this.remotes = d.remotes || this.remotes;
+      } catch (e) { this.remoteError = 'Add failed'; }
+      finally { this.remoteBusy = false; }
+    },
+
+    async removeRemote(name) {
+      if (!confirm(`Remove server "${name}"?`)) return;
+      try {
+        const r = await fetch(`/api/remotes/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const d = await r.json();
+        this.remotes = d.remotes || (this.remotes || []).filter(x => x.name !== name);
+      } catch (e) { this.remoteError = 'Remove failed'; }
     },
 
     async forkFromEvent(uuid) {
@@ -1243,12 +1400,24 @@ function fleet() {
 
     async loadInsights() {
       this.insights = null;
+      this.forks = null;
       const r = await fetch('/api/insights');
       this.insights = await r.json();
+      fetch('/api/forks').then(r => r.json()).then(d => { this.forks = d; });
     },
     barPct(v, max) {
       if (!max || !v) return 0;
       return Math.max(2, Math.round((v / max) * 100));
+    },
+    // Flatten a fork family tree into indented rows for rendering.
+    flattenForks(families) {
+      const out = [];
+      const walk = (n, depth) => {
+        out.push({ ...n, depth });
+        (n.children || []).forEach(c => walk(c, depth + 1));
+      };
+      (families || []).forEach(f => walk(f, 0));
+      return out;
     },
 
     toast(msg) {

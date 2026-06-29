@@ -53,22 +53,34 @@ def test_focus_tty_window_calls_terminal_focus(monkeypatch):
 
 def test_resume_missing_project_dir(monkeypatch):
     monkeypatch.setattr(app, "_find_history_session",
-                        lambda sid: {"platform": "claude", "project": "/no/such/dir/xyz"})
+                        lambda sid, source="": {"platform": "claude", "project": "/no/such/dir/xyz"})
     r = app.api_history_resume("sid")
     assert r["ok"] is False and "not found" in r["error"]
 
 
 def test_fork_missing_project_dir(monkeypatch):
     monkeypatch.setattr(app, "_find_history_session",
-                        lambda sid: {"platform": "claude", "project": "/no/such/dir/xyz"})
+                        lambda sid, source="": {"platform": "claude", "project": "/no/such/dir/xyz"})
     r = app.api_history_fork("sid")
     assert r["ok"] is False and "not found" in r["error"]
 
 
 def test_resume_valid_dir_proceeds(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "_find_history_session",
-                        lambda sid: {"platform": "codex", "project": str(tmp_path)})
+                        lambda sid, source="": {"platform": "codex", "project": str(tmp_path)})
     monkeypatch.setattr(app.terminal, "launch_session",
                         lambda *a, **k: {"ok": True, "action": "resumed"})
     r = app.api_history_resume("sid")
     assert r["ok"] is True
+
+
+def test_resume_remote_uses_ssh(monkeypatch):
+    monkeypatch.setattr(app, "_find_history_session",
+                        lambda sid, source="": {"platform": "codex", "project": "/remote/dir",
+                                                "source": "2224"})
+    monkeypatch.setattr(app.remote, "ssh_for", lambda s: "ssh -p 2224 root@localhost")
+    seen = {}
+    monkeypatch.setattr(app.terminal, "launch_session",
+                        lambda *a, **k: seen.update(k) or {"ok": True, "action": "resumed"})
+    r = app.api_history_resume("sid")
+    assert r["ok"] is True and seen.get("ssh") == "ssh -p 2224 root@localhost"

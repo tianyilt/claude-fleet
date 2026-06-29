@@ -82,6 +82,7 @@ class Window:
     tty: Optional[str]
     transcript_path: Optional[str]
     alive: bool
+    source: str = "local"
 
     def to_dict(self) -> dict:
         d = asdict(self)

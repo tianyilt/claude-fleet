@@ -26,11 +26,13 @@ The first run creates a venv and installs dependencies automatically — nothing
 ./scripts/build-app.sh --install      # builds + copies to /Applications
 ```
 
-Resume/Fork open a new terminal via `open -a` (LaunchServices) — no Automation
-permission needed, so they work even after a restart. **Focus** (raising the tab
-that owns a session) does use AppleScript; the first time you use it, approve
-**“Claude Fleet” wants to control “iTerm.app”** — the signed app makes that grant
-stick. For development with hot-reload, use `./run.sh`.
+Resume/Fork open a new terminal via `open` (LaunchServices) in your **default
+terminal** — whatever handles `.command` (Terminal.app, or iTerm2 / Warp if you
+set it) — no Automation permission needed, so they work even after a restart.
+**Focus** (raising the tab that owns a session) does use AppleScript; the first
+time you use it, approve **“Claude Fleet” wants to control “Terminal.app”** (or
+your terminal of choice) — the signed app makes that grant stick. For development
+with hot-reload, use `./run.sh`.
 
 **Run anywhere (Windows / Linux).** The dashboard, history, search and monitoring
 are cross-platform:
@@ -183,7 +185,7 @@ core/
   patrol.py           triage classification engine
   codex.py            Codex session parsing
   search.py           cross-platform ripgrep search
-  terminal.py         per-platform terminal control (macOS iTerm2; degrades elsewhere)
+  terminal.py         per-platform terminal control (macOS default terminal; degrades elsewhere)
   actions.py          fork / review / close (session lookup around terminal.py)
   history.py          unified index + full-text rg search
   skills.py           skill directory scan

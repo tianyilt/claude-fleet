@@ -24,10 +24,11 @@ cd claude-fleet && bash run.sh
 ./scripts/build-app.sh --install      # 构建并拷到 /Applications
 ```
 
-Resume/Fork 通过 `open -a`(LaunchServices)开新终端 —— **不需要自动化授权**,重启后
-也照常工作。**Focus**(把拥有该 session 的 tab 切到前台)用的是 AppleScript,第一次用时
-批准 **“Claude Fleet”想要控制“iTerm.app”** 即可,签名 app 让这个授权长期生效。需要热
-重载开发时用 `./run.sh`。
+Resume/Fork 通过 `open`(LaunchServices)在你的**默认终端**里开新窗口 —— 谁注册了
+`.command` 就用谁(默认 Terminal.app,你设了 iTerm2 / Warp 就用那个),**不需要自动化
+授权**,重启后也照常工作。**Focus**(把拥有该 session 的 tab 切到前台)用的是 AppleScript,
+第一次用时批准 **“Claude Fleet”想要控制“Terminal.app”**(或你用的那个终端)即可,签名 app
+让这个授权长期生效。需要热重载开发时用 `./run.sh`。
 
 **任意平台（Windows / Linux）。** dashboard、历史、搜索、监控都是跨平台的：
 
@@ -158,7 +159,7 @@ core/
   patrol.py           triage 分类引擎
   codex.py            Codex session 解析
   search.py           ripgrep 跨平台搜索
-  terminal.py         按平台分派的终端控制（macOS iTerm2；其它平台降级）
+  terminal.py         按平台分派的终端控制（macOS 默认终端；其它平台降级）
   actions.py          fork / review / close（在 terminal.py 外层做 session 查找）
   history.py          统一索引 + 全文 rg 搜索
   skills.py           skill 目录扫描

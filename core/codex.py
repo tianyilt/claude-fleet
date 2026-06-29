@@ -291,45 +291,56 @@ def extract_codex_session_activity(path: Path | str) -> dict:
 _codex_cache: dict[str, tuple[int, int, "CodexSession"]] = {}
 
 
+def _build_codex_session(f: Path) -> Optional[CodexSession]:
+    """Parse ONE rollout file into a CodexSession, cached by (mtime, size).
+
+    Shared by list_codex_sessions (full scan, for History) and list_codex_windows
+    (which only needs the specific file an lsof confirmed a process has open) —
+    so the live board never has to rglob the whole sessions tree."""
+    try:
+        st = f.stat()
+    except Exception:
+        return None
+    key = str(f)
+    mtime = int(st.st_mtime * 1000)
+    cached = _codex_cache.get(key)
+    if cached and cached[0] == mtime and cached[1] == st.st_size:
+        return cached[2]
+    meta = _parse_session_meta(f)
+    if not meta:
+        return None
+    cwd = meta.get("cwd", "")
+    activity = extract_codex_session_activity(f)
+    cs = CodexSession(
+        session_id=meta.get("id", f.stem),
+        project=cwd,
+        project_name=cwd.rsplit("/", 1)[-1] if cwd else f.stem,
+        first_input=_extract_first_user_input(f),
+        first_ts=meta.get("timestamp", ""),
+        last_ts=meta.get("timestamp", ""),
+        transcript_path=str(f),
+        transcript_size=st.st_size,
+        transcript_mtime=mtime,
+        cli_version=meta.get("cli_version", ""),
+        model_provider=meta.get("model_provider", ""),
+        model=activity["model"],
+        skills_used=activity["skills_used"],
+        memory_ops=activity["memory_ops"],
+        skill_breakdown=activity["skill_breakdown"],
+        metrics=activity.get("metrics", {}),
+    )
+    _codex_cache[key] = (mtime, st.st_size, cs)
+    return cs
+
+
 def list_codex_sessions() -> list[CodexSession]:
     if not CODEX_SESSIONS_DIR.exists():
         return []
     sessions: list[CodexSession] = []
     for f in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
-        try:
-            st = f.stat()
-        except Exception:
-            continue
-        key = str(f)
-        cached = _codex_cache.get(key)
-        if cached and cached[0] == int(st.st_mtime * 1000) and cached[1] == st.st_size:
-            sessions.append(cached[2])
-            continue
-        meta = _parse_session_meta(f)
-        if not meta:
-            continue
-        cwd = meta.get("cwd", "")
-        activity = extract_codex_session_activity(f)
-        cs = CodexSession(
-            session_id=meta.get("id", f.stem),
-            project=cwd,
-            project_name=cwd.rsplit("/", 1)[-1] if cwd else f.stem,
-            first_input=_extract_first_user_input(f),
-            first_ts=meta.get("timestamp", ""),
-            last_ts=meta.get("timestamp", ""),
-            transcript_path=str(f),
-            transcript_size=st.st_size,
-            transcript_mtime=int(st.st_mtime * 1000),
-            cli_version=meta.get("cli_version", ""),
-            model_provider=meta.get("model_provider", ""),
-            model=activity["model"],
-            skills_used=activity["skills_used"],
-            memory_ops=activity["memory_ops"],
-            skill_breakdown=activity["skill_breakdown"],
-            metrics=activity.get("metrics", {}),
-        )
-        _codex_cache[key] = (int(st.st_mtime * 1000), st.st_size, cs)
-        sessions.append(cs)
+        cs = _build_codex_session(f)
+        if cs is not None:
+            sessions.append(cs)
     sessions.sort(key=lambda s: s.transcript_mtime, reverse=True)
     return sessions
 
@@ -364,92 +375,119 @@ def _running_codex_pids() -> list[int]:
     return pids
 
 
-def _pid_cwd(pid: int) -> Optional[str]:
+def _pid_files(pid: int) -> tuple:
+    """(cwd, open_rollout_path) for a pid from a single lsof call. open_rollout is
+    the ~/.codex/sessions/*.jsonl the process currently has open (only present
+    while it's writing), which is the EXACT process↔session link when available."""
     try:
         out = subprocess.check_output(
-            ["lsof", "-a", "-d", "cwd", "-Fn", "-p", str(pid)],
+            ["lsof", "-p", str(pid), "-Ffn"],
             text=True, timeout=4, stderr=subprocess.DEVNULL,
         )
     except Exception:
-        return None
+        return None, None
+    cwd = None
+    rollout = None
+    fd = None
     for line in out.splitlines():
-        if line.startswith("n"):
-            return line[1:].strip() or None
-    return None
+        if line.startswith("f"):
+            fd = line[1:]
+        elif line.startswith("n"):
+            name = line[1:]
+            if fd == "cwd" and cwd is None:
+                cwd = name or None
+            elif name.endswith(".jsonl") and "/.codex/sessions/" in name:
+                rollout = name
+    return cwd, rollout
 
 
-# Cache the (expensive) full codex scan + lsof between snapshot polls. The scan
-# (rglob over 1400+ files) and per-pid lsof only need re-running when the set of
-# running codex pids changes; otherwise we just refresh idle_seconds on the cached
-# windows. Keyed on the running-pid set; short TTL bounds staleness.
+# pid -> rollout path the process was last seen with OPEN via lsof. This is the
+# ONLY reliable process↔session link (codex records no pid/tty in the rollout, and
+# a long-lived TUI runs many sessions, so start-time matching is meaningless).
+# It's caught whenever the session does a turn; persists across polls.
+_pid_rollout: dict[int, str] = {}
+
+# Short cache so the watcher's 2s poll doesn't lsof every tick.
 _win_cache: dict = {"pids": None, "windows": [], "ts": 0.0}
-_WIN_CACHE_TTL = 10.0
+_WIN_CACHE_TTL = 2.0
+
+
+def _codex_window(pid: int, tty, cwd, cs, now_ms: int, active: bool) -> dict:
+    # `active` = the process has its rollout open right now (i.e. generating).
+    if cs is not None:
+        return {
+            "pid": pid, "session_id": cs.session_id, "cwd": cwd or cs.project,
+            "project_name": cs.project_name, "project_slug": "",
+            "name": cs.first_input or cs.project_name, "first_input": cs.first_input,
+            "status": "running", "waiting_for": None,
+            "started_at": cs.transcript_mtime, "updated_at": cs.transcript_mtime,
+            "version": cs.cli_version, "tty": tty,
+            "transcript_path": cs.transcript_path, "alive": True,
+            "platform": "codex", "model": cs.model, "active": active,
+            "idle_seconds": max(0, int((now_ms - cs.transcript_mtime) / 1000)),
+        }
+    # Identity not yet confirmed (idle at a prompt, never caught mid-turn). Show a
+    # NEUTRAL card keyed by its terminal so it's identifiable + focusable — never a
+    # guessed title. idle_seconds=None so the UI doesn't show a bogus "0s ago".
+    ttyname = (tty or "").rsplit("/", 1)[-1] or "?"
+    return {
+        "pid": pid, "session_id": f"codex-pid-{pid}", "cwd": cwd or "",
+        "project_name": ttyname, "project_slug": "",
+        "name": f"codex @ {ttyname}", "first_input": "",
+        "status": "running", "waiting_for": None,
+        "started_at": now_ms, "updated_at": now_ms, "version": "",
+        "tty": tty, "transcript_path": None, "alive": True,
+        "platform": "codex", "model": "", "active": active,
+        "idle_seconds": None,
+    }
 
 
 def list_codex_windows() -> list[dict]:
-    """Live codex sessions as Window-compatible dicts (platform='codex').
+    """Open codex terminals as Window-compatible dicts (platform='codex').
 
-    For each running codex process we take its cwd and pick the most recently
-    written rollout in that directory as the active session. Dicts mirror
-    sessions.Window.to_dict() so the dashboard renders them like Claude cards.
+    ONE card per running codex process (= one open terminal). Identity is honest:
+    if lsof has caught which rollout the process has open (now or earlier, while it
+    did a turn) we show that real session; otherwise a neutral "codex · <cwd>"
+    card. We never fabricate a title from an unrelated old rollout — that's what
+    surfaced long-closed sessions. Focus only needs the process's own tty.
     """
     pids = _running_codex_pids()
     if not pids:
         _win_cache.update(pids=(), windows=[], ts=time.time())
+        _pid_rollout.clear()
         return []
 
     now = time.time()
     now_ms = int(now * 1000)
     pidset = tuple(sorted(pids))
     if pidset == _win_cache["pids"] and now - _win_cache["ts"] < _WIN_CACHE_TTL:
-        # Same processes as last scan — skip the rescan, just age the idle clock.
         for w in _win_cache["windows"]:
-            w["idle_seconds"] = max(0, int((now_ms - w["updated_at"]) / 1000))
+            if w.get("transcript_path"):
+                w["idle_seconds"] = max(0, int((now_ms - w["updated_at"]) / 1000))
         return _win_cache["windows"]
-
-    # cwd -> newest matching CodexSession (the file being appended right now).
-    by_cwd: dict[str, CodexSession] = {}
-    for cs in list_codex_sessions():  # already mtime-sorted, newest first
-        cur = by_cwd.get(cs.project)
-        if cs.project and (cur is None or cs.transcript_mtime > cur.transcript_mtime):
-            by_cwd[cs.project] = cs
 
     from .sessions import get_tty
 
-    windows: dict[str, dict] = {}
+    windows: list[dict] = []
     for pid in pids:
-        cwd = _pid_cwd(pid)
-        if not cwd:
+        cwd, open_rollout = _pid_files(pid)
+        if open_rollout:
+            _pid_rollout[pid] = open_rollout      # confirmed: this is its session
+        path = _pid_rollout.get(pid)
+        cs = _build_codex_session(Path(path)) if path else None
+        # Only show codex terminals we can actually identify (lsof confirmed the
+        # rollout, now or earlier). An unidentified one is just a grey "some codex
+        # is open" card with no useful info — clutter, so skip it. It'll appear the
+        # moment that session does a turn and we catch its rollout.
+        if cs is None:
             continue
-        cs = by_cwd.get(cwd)
-        if not cs:
-            continue
-        # One card per session even if codex spawned several processes.
-        if cs.session_id in windows:
-            continue
-        windows[cs.session_id] = {
-            "pid": pid,
-            "session_id": cs.session_id,
-            "cwd": cwd,
-            "project_name": cs.project_name,
-            "project_slug": "",
-            "name": cs.first_input or cs.project_name,
-            "first_input": cs.first_input,
-            "status": "running",
-            "waiting_for": None,
-            "started_at": cs.transcript_mtime,
-            "updated_at": cs.transcript_mtime,
-            "version": cs.cli_version,
-            "tty": get_tty(pid),
-            "transcript_path": cs.transcript_path,
-            "alive": True,
-            "platform": "codex",
-            "model": cs.model,
-            "idle_seconds": max(0, int((now_ms - cs.transcript_mtime) / 1000)),
-        }
-    result = list(windows.values())
-    _win_cache.update(pids=pidset, windows=result, ts=now)
-    return result
+        windows.append(_codex_window(pid, get_tty(pid), cwd, cs, now_ms,
+                                     active=bool(open_rollout)))
+    for dead in [p for p in _pid_rollout if p not in set(pids)]:
+        _pid_rollout.pop(dead, None)
+
+    _win_cache.update(pids=pidset, windows=windows, ts=now)
+    return windows
 
 
 def find_codex_transcript_path(session_id: str) -> Optional[Path]:

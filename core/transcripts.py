@@ -507,6 +507,36 @@ def extract_plan_history(path: str | Path) -> list[dict]:
     return history
 
 
+def plan_title(path: str | Path) -> Optional[str]:
+    """The H1 heading of the latest plan-mode plan this session wrote, if any.
+
+    A plan's `# Title` describes what the session set out to do far better than a
+    raw first prompt (which is often a long paste or a vague "看下…"). Used to title
+    History rows. Returns None when the session never wrote a ~/.claude/plans/*.md.
+    """
+    latest = None
+    for d in _iter_lines(Path(path)):
+        if d.get("type") != "assistant":
+            continue
+        for c in ((d.get("message") or {}).get("content") or []):
+            if not isinstance(c, dict) or c.get("type") != "tool_use" or c.get("name") != "Write":
+                continue
+            inp = c.get("input") or {}
+            fp = str(inp.get("file_path", ""))
+            if "/.claude/plans/" in fp and fp.endswith(".md"):
+                latest = inp.get("content", "")
+    if not latest:
+        return None
+    for line in latest.splitlines():
+        s = line.strip()
+        if s.startswith("# "):
+            return s[2:].strip()[:120]
+    for line in latest.splitlines():          # fallback: first non-empty line
+        if line.strip():
+            return line.strip().lstrip("#").strip()[:120]
+    return None
+
+
 # --- live-window enrichment cache -------------------------------------------
 # The 2s dashboard poll used to run current_task_hint + extract_skills_used +
 # extract_memory_ops + extract_background_tasks on EVERY live window EVERY tick —

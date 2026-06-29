@@ -79,6 +79,27 @@ def test_launch_success_spawns_detached(monkeypatch):
     assert calls.get("spawned") is True
 
 
+# ---------- macOS launcher follows the default terminal (no forced iTerm) ----------
+
+def test_macos_launcher_uses_default_terminal(monkeypatch):
+    monkeypatch.setattr(terminal, "IS_MAC", True)
+    monkeypatch.setattr(terminal.shutil, "which", lambda x: "/usr/bin/open")
+    cmd = terminal._macos_terminal_command("cd /tmp && claude --resume sid", "/tmp")
+    # `open <script>.command` with NO `-a` → the user's default terminal handles it.
+    assert cmd[0] == "open" and len(cmd) == 2
+    assert cmd[1].endswith(".command")
+    assert "-a" not in cmd and "iTerm" not in cmd and "Terminal" not in cmd
+    # the script body is the keepalive (no exec)
+    import pathlib
+    assert "exec " not in pathlib.Path(cmd[1]).read_text()
+
+
+def test_macos_launcher_none_without_open(monkeypatch):
+    monkeypatch.setattr(terminal, "IS_MAC", True)
+    monkeypatch.setattr(terminal.shutil, "which", lambda x: None)
+    assert terminal._macos_terminal_command("cmd", "/tmp") is None
+
+
 # ---------- keepalive script (Fix 1b: no exec, hold window open on fast exit) ----------
 
 def test_keepalive_script_no_exec():
