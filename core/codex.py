@@ -411,9 +411,19 @@ _pid_rollout: dict[int, str] = {}
 _win_cache: dict = {"pids": None, "windows": [], "ts": 0.0}
 _WIN_CACHE_TTL = 2.0
 
+# A codex process keeps its rollout file open the WHOLE time it's alive (not just
+# while generating), so an open fd ("active") proves identity, not activity. The
+# honest "is it generating right now" signal is that the rollout is being WRITTEN:
+# codex appends each reasoning/output/tool event as it streams. So we treat a
+# session as working only if its transcript was touched within this window, and
+# idle otherwise. Generous enough to ride over a slow tool call without flapping.
+CODEX_WORKING_IDLE_SEC = 120
+
 
 def _codex_window(pid: int, tty, cwd, cs, now_ms: int, active: bool) -> dict:
-    # `active` = the process has its rollout open right now (i.e. generating).
+    # `active` = the process has its rollout fd open (proves WHICH session this pid
+    # owns). It does NOT mean "generating" — codex holds that fd open while idle
+    # too. Liveness/working is decided from transcript mtime by the caller.
     if cs is not None:
         return {
             "pid": pid, "session_id": cs.session_id, "cwd": cwd or cs.project,
@@ -636,3 +646,52 @@ def codex_timeline(path: str | Path, limit: int = 60) -> list[dict]:
     except Exception:
         pass
     return events[-limit:]
+
+
+_PLAN_MARK = {"completed": "[x]", "in_progress": "[~]"}
+
+
+def codex_plan_history(path: str | Path) -> list[dict]:
+    """Codex tracks its TODO checklist via the `update_plan` tool; each call is a
+    new snapshot of the whole plan. Render each into the same shape the Claude
+    plan panel consumes ({ts, plan_file, operation, version_label, content, diff})
+    so the Plan view lights up for codex sessions too.
+
+    update_plan arguments look like:
+        {"explanation": "...", "plan": [{"step": "...", "status": "completed"}, ...]}
+    """
+    p = Path(path)
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        with p.open() as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                pl = d.get("payload") or {}
+                if pl.get("type") != "function_call" or pl.get("name") != "update_plan":
+                    continue
+                try:
+                    args = json.loads(pl.get("arguments") or "{}")
+                except Exception:
+                    continue
+                steps = args.get("plan") or []
+                lines = [f"- {_PLAN_MARK.get(s.get('status', ''), '[ ]')} {s.get('step', '')}"
+                         for s in steps if isinstance(s, dict)]
+                explanation = (args.get("explanation") or "").strip()
+                content = (explanation + "\n\n" if explanation else "") + "\n".join(lines)
+                out.append({
+                    "ts": d.get("timestamp", ""),
+                    "plan_file": "codex update_plan",
+                    "operation": "write",
+                    "version_label": f"v{len(out) + 1}",
+                    "content": content,
+                    "diff": None,
+                    "uuid": "",
+                })
+    except Exception:
+        pass
+    return out

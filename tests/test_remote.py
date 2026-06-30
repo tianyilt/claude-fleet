@@ -157,6 +157,30 @@ def test_remote_session_command_claude_fork():
     assert cmd.startswith("ssh box -t ")
 
 
+def test_remote_session_command_exports_env_path():
+    """The non-interactive SSH shell lacks codex on PATH; the resume command must
+    prepend the captured remote PATH so the binary resolves."""
+    cmd = terminal.remote_session_command("ssh box", "codex", "abc", "/r",
+                                          env_path="/root/.nvm/x/bin:/usr/bin")
+    assert "export PATH=/root/.nvm/x/bin:/usr/bin:$PATH &&" in cmd
+    assert "codex resume abc" in cmd
+
+
+def test_resume_path_reads_cache(remotes_file):
+    remote.CACHE["srv1"] = {"ok": True, "path": "/root/bin:/usr/bin",
+                            "windows": [], "history": []}
+    assert remote.resume_path("srv1") == "/root/bin:/usr/bin"
+    assert remote.resume_path("missing") == ""
+
+
+def test_collect_carries_path(remotes_file, monkeypatch):
+    remote.add_remote("srv1", "ssh x")
+    monkeypatch.setattr(remote, "collect",
+                        lambda r: {"home": "/root", "path": "/root/bin", "windows": [], "history": []})
+    remote.poll_all()
+    assert remote.CACHE["srv1"]["path"] == "/root/bin"
+
+
 def test_launch_session_remote_uses_ssh(monkeypatch):
     seen = {}
     monkeypatch.setattr(terminal, "_terminal_command",

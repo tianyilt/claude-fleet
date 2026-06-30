@@ -182,3 +182,63 @@ def test_codex_share_renders(tmp_path, monkeypatch):
     monkeypatch.setattr(codex, "find_codex_transcript_path", lambda sid: f)
     title, html = share.render_session_html("codexsid1")
     assert "foo" in title and "hello codex" in html
+
+
+# ---------- Fix: codex triage from mtime, not the always-open rollout fd ----------
+
+def test_codex_idle_not_stuck_working(monkeypatch):
+    """codex holds its rollout fd open for life, so active=True is permanent. An
+    idle session (old transcript) must read 'idle', never a fake 'working'."""
+    import app
+    monkeypatch.setattr(app.sessions, "snapshot", lambda: {"windows": [], "counts": {}, "ts": 0})
+    monkeypatch.setattr(app.perms, "pending_by_tty", lambda: {})
+    monkeypatch.setattr(app.remote, "cached_windows", lambda: [])
+    win = {"pid": 1, "platform": "codex", "session_id": "s", "tty": "/dev/ttys1",
+           "transcript_path": None, "active": True,             # fd open (alive)
+           "idle_seconds": 99999, "updated_at": 1, "status": "running"}
+    monkeypatch.setattr(app.codex, "list_codex_windows", lambda: [dict(win)])
+    snap = app._build_enriched_snapshot()
+    cx = [w for w in snap["windows"] if w["platform"] == "codex"][0]
+    assert cx["triage"] == "idle"
+
+
+def test_codex_recent_write_is_working(monkeypatch):
+    import app
+    monkeypatch.setattr(app.sessions, "snapshot", lambda: {"windows": [], "counts": {}, "ts": 0})
+    monkeypatch.setattr(app.perms, "pending_by_tty", lambda: {})
+    monkeypatch.setattr(app.remote, "cached_windows", lambda: [])
+    win = {"pid": 1, "platform": "codex", "session_id": "s", "tty": "/dev/ttys1",
+           "transcript_path": None, "active": True,
+           "idle_seconds": 5, "updated_at": 1, "status": "running"}   # just wrote
+    monkeypatch.setattr(app.codex, "list_codex_windows", lambda: [dict(win)])
+    snap = app._build_enriched_snapshot()
+    cx = [w for w in snap["windows"] if w["platform"] == "codex"][0]
+    assert cx["triage"] == "working"
+
+
+# ---------- Fix: codex plan (update_plan) → plan_history versions ----------
+
+def test_codex_plan_history_versions(tmp_path):
+    f = tmp_path / "rollout.jsonl"
+    _write_jsonl(f, [
+        {"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}},
+        {"timestamp": "t1", "type": "response_item", "payload": {
+            "type": "function_call", "name": "update_plan", "arguments": json.dumps(
+                {"explanation": "first", "plan": [
+                    {"step": "read", "status": "in_progress"},
+                    {"step": "fix", "status": "pending"}]})}},
+        {"timestamp": "t2", "type": "response_item", "payload": {
+            "type": "function_call", "name": "update_plan", "arguments": json.dumps(
+                {"plan": [{"step": "read", "status": "completed"},
+                          {"step": "fix", "status": "in_progress"}]})}},
+    ])
+    ph = codex.codex_plan_history(f)
+    assert [v["version_label"] for v in ph] == ["v1", "v2"]
+    assert "[~] read" in ph[0]["content"] and "[ ] fix" in ph[0]["content"]
+    assert "[x] read" in ph[1]["content"] and "[~] fix" in ph[1]["content"]
+
+
+def test_codex_plan_history_empty_when_no_plan(tmp_path):
+    f = tmp_path / "rollout.jsonl"
+    _write_jsonl(f, [{"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}}])
+    assert codex.codex_plan_history(f) == []

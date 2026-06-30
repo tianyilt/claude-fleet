@@ -71,6 +71,14 @@ def ssh_for(source: str) -> Optional[str]:
     return None
 
 
+def resume_path(source: str) -> str:
+    """The remote's toolchain PATH (codex/claude live here), captured at collect
+    time. Prepended to the resume command so a non-interactive SSH shell — which
+    skips the user's profile and nvm setup — can still find the binary."""
+    with _lock:
+        return CACHE.get(source, {}).get("path", "")
+
+
 # ---------- collect over SSH ----------
 
 def collect(remote: dict) -> dict:
@@ -88,8 +96,9 @@ def collect(remote: dict) -> dict:
 
 
 def remote_timeline(source: str, transcript_path: str, platform: str,
-                    limit: int = 2000) -> list[dict]:
-    """SSH-cat a remote transcript and parse it into timeline events locally."""
+                    limit: int = 2000) -> dict:
+    """SSH-cat a remote transcript and parse it into timeline events locally.
+    Returns {events, plan_history} (plan_history populated for codex)."""
     import os
     import tempfile
     from . import codex as _codex, transcripts as _tx
@@ -106,8 +115,9 @@ def remote_timeline(source: str, transcript_path: str, platform: str,
         tmp.write(proc.stdout)
         tmp.close()
         if platform == "codex":
-            return _codex.codex_timeline(tmp.name, limit=limit)
-        return _tx.timeline(tmp.name, limit=limit)
+            return {"events": _codex.codex_timeline(tmp.name, limit=limit),
+                    "plan_history": _codex.codex_plan_history(tmp.name)}
+        return {"events": _tx.timeline(tmp.name, limit=limit), "plan_history": []}
     finally:
         try:
             os.unlink(tmp.name)
@@ -122,13 +132,14 @@ def poll_all() -> None:
         try:
             data = collect(r)
             entry = {"ts": _now_ms(), "ok": True, "error": "", "home": data.get("home", ""),
+                     "path": data.get("path", ""),
                      "windows": data.get("windows", []), "history": data.get("history", [])}
         except Exception as e:
             with _lock:
                 prev = CACHE.get(name, {})
             # keep last-good windows/history; just flag unreachable
             entry = {"ts": _now_ms(), "ok": False, "error": str(e)[:300],
-                     "home": prev.get("home", ""),
+                     "home": prev.get("home", ""), "path": prev.get("path", ""),
                      "windows": prev.get("windows", []), "history": prev.get("history", [])}
         with _lock:
             CACHE[name] = entry
@@ -172,8 +183,10 @@ def cached_windows() -> list[dict]:
             cwd = w.get("cwd", "")
             updated = w.get("updated_at", 0) or 0
             idle = max(0, int((now - updated) / 1000)) if updated else None
-            # honest-ish triage from idle (no remote stop_reason): recent → working.
-            triage = "working" if (idle is not None and idle < 300) else "idle"
+            # Same honest rule as local codex: recent transcript write = generating.
+            from .codex import CODEX_WORKING_IDLE_SEC
+            triage = ("working" if (idle is not None and idle < CODEX_WORKING_IDLE_SEC)
+                      else "idle")
             out.append({
                 "pid": w.get("pid", 0), "session_id": w.get("session_id", ""),
                 "cwd": cwd, "project_name": cwd.rsplit("/", 1)[-1] or name,

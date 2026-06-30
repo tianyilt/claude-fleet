@@ -124,12 +124,14 @@ def _build_enriched_snapshot() -> dict:
             cw.setdefault("permission_ts", None)
             tp = cw.get("transcript_path")
             cw["current_task"] = codex.codex_current_task(tp) if tp else None
-            # Honest state: "working" (green) ONLY while the process is actually
-            # generating (rollout open via lsof). Otherwise it's an open terminal
-            # sitting idle at a prompt — show a calm "idle", never a fake "working".
-            if cw.get("active"):
+            # Honest state from transcript ACTIVITY, not the open fd: codex keeps its
+            # rollout open the whole time it's alive, so "active" (lsof) was always
+            # true → every codex card was permanently "working". Use mtime instead —
+            # codex appends events as it streams, so a recently-written transcript is
+            # genuinely generating; a stale one is an open terminal sitting idle.
+            if idle < codex.CODEX_WORKING_IDLE_SEC:
                 cw["triage"] = "working"
-                cw["triage_reason"] = "codex · generating"
+                cw["triage_reason"] = "codex · active (recent output)"
             else:
                 cw["triage"] = "idle"
                 cw["triage_reason"] = "codex · open (idle)"
@@ -440,10 +442,11 @@ def api_history_timeline(session_id: str, limit: int = 2000, source: str = "") -
         rsess = _find_history_session(session_id, source)
         if rsess and rsess.get("transcript_path"):
             try:
-                events = remote.remote_timeline(source, rsess["transcript_path"],
-                                                rsess.get("platform", "codex"), limit=limit)
+                tl = remote.remote_timeline(source, rsess["transcript_path"],
+                                            rsess.get("platform", "codex"), limit=limit)
                 return {"session_id": session_id, "project_slug": source,
-                        "events": events, "platform": rsess.get("platform", "codex")}
+                        "events": tl["events"], "plan_history": tl["plan_history"],
+                        "platform": rsess.get("platform", "codex")}
             except Exception as e:
                 raise HTTPException(502, f"remote transcript fetch failed: {e}")
         raise HTTPException(404, "remote transcript not found")
@@ -469,7 +472,9 @@ def api_history_timeline(session_id: str, limit: int = 2000, source: str = "") -
         for f in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
             if session_id in f.stem:
                 events = codex.codex_timeline(str(f), limit=limit)
-                return {"session_id": session_id, "project_slug": "codex", "events": events, "platform": "codex"}
+                return {"session_id": session_id, "project_slug": "codex",
+                        "events": events, "platform": "codex",
+                        "plan_history": codex.codex_plan_history(str(f))}
     # OpenCode sessions (SQLite)
     try:
         from core.opencode import opencode_timeline
@@ -482,10 +487,11 @@ def api_history_timeline(session_id: str, limit: int = 2000, source: str = "") -
     rsess = _find_history_session(session_id)
     if rsess and rsess.get("source", "local") != "local" and rsess.get("transcript_path"):
         try:
-            events = remote.remote_timeline(rsess["source"], rsess["transcript_path"],
-                                            rsess.get("platform", "codex"), limit=limit)
+            tl = remote.remote_timeline(rsess["source"], rsess["transcript_path"],
+                                        rsess.get("platform", "codex"), limit=limit)
             return {"session_id": session_id, "project_slug": rsess["source"],
-                    "events": events, "platform": rsess.get("platform", "codex")}
+                    "events": tl["events"], "plan_history": tl["plan_history"],
+                    "platform": rsess.get("platform", "codex")}
         except Exception as e:
             raise HTTPException(502, f"remote transcript fetch failed: {e}")
     raise HTTPException(404, "transcript not found")
@@ -513,7 +519,8 @@ def _resume_or_fork(session_id: str, source: str, fork: bool) -> dict:
         ssh = remote.ssh_for(src)
         if not ssh:
             return {"ok": False, "error": f"remote '{src}' is not registered"}
-        return terminal.launch_session(platform, session_id, cwd, fork=fork, ssh=ssh)
+        return terminal.launch_session(platform, session_id, cwd, fork=fork, ssh=ssh,
+                                       env_path=remote.resume_path(src))
     if cwd and not Path(cwd).is_dir():
         return {"ok": False, "error": (
             f"project directory not found: {cwd} — restore it or delete the session")}

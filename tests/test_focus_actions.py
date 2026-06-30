@@ -77,10 +77,11 @@ def test_resume_valid_dir_proceeds(monkeypatch, tmp_path):
 def test_resume_remote_uses_ssh(monkeypatch):
     monkeypatch.setattr(app, "_find_history_session",
                         lambda sid, source="": {"platform": "codex", "project": "/remote/dir",
-                                                "source": "2224"})
-    monkeypatch.setattr(app.remote, "ssh_for", lambda s: "ssh -p 2224 root@localhost")
+                                                "source": "srv1"})
+    monkeypatch.setattr(app.remote, "ssh_for", lambda s: "ssh -p 2222 user@host")
+    monkeypatch.setattr(app.remote, "resume_path", lambda s: "")
     seen = {}
     monkeypatch.setattr(app.terminal, "launch_session",
                         lambda *a, **k: seen.update(k) or {"ok": True, "action": "resumed"})
     r = app.api_history_resume("sid")
-    assert r["ok"] is True and seen.get("ssh") == "ssh -p 2224 root@localhost"
+    assert r["ok"] is True and seen.get("ssh") == "ssh -p 2222 user@host"

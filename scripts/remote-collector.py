@@ -49,6 +49,30 @@ def _pid_tty(pid):
     return f"/dev/{out}" if out and out != "??" else None
 
 
+def _pid_env_path(pid):
+    """The PATH of a running process — used so a non-interactive `ssh host 'codex
+    resume'` can actually find the binary (login shells often don't expose nvm)."""
+    try:                                   # Linux
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            for kv in f.read().split(b"\0"):
+                if kv.startswith(b"PATH="):
+                    return kv[5:].decode("utf-8", "replace")
+    except Exception:
+        pass
+    out = _run(["ps", "eww", "-p", str(pid)])   # BSD/macOS fallback
+    m = re.search(r"(?:^| )PATH=(\S+)", out)
+    return m.group(1) if m else ""
+
+
+def _fallback_path():
+    """A PATH likely to contain codex/claude when no live proc gave us one:
+    every nvm node bin + the usual user/local bins, then the collector's own."""
+    dirs = sorted(glob.glob(os.path.join(HOME, ".nvm/versions/node/*/bin")), reverse=True)
+    dirs += [os.path.join(HOME, ".local/bin"), "/usr/local/bin", "/opt/homebrew/bin"]
+    dirs = [d for d in dirs if os.path.isdir(d)]
+    return ":".join(dirs + [os.environ.get("PATH", "")])
+
+
 def _slug(cwd):
     return cwd.replace("/", "-").replace("_", "-").replace(".", "-")
 
@@ -113,6 +137,7 @@ def _claude_windows():
             "updated_at": int(d.get("updatedAt", 0)),
             "tty": _pid_tty(pid),
             "transcript_path": tp if os.path.exists(tp) else None,
+            "env_path": _pid_env_path(pid),
         })
     return out
 
@@ -189,6 +214,7 @@ def _codex_windows():
             "cwd": cwd, "name": _codex_first_user(path), "first_input": _codex_first_user(path),
             "status": "running", "waiting_for": None, "updated_at": mtime,
             "tty": _pid_tty(pid), "transcript_path": path,
+            "env_path": _pid_env_path(pid),
         })
     return out
 
@@ -235,10 +261,14 @@ def _history():
 
 def main():
     try:
-        result = {"home": HOME, "windows": _claude_windows() + _codex_windows(),
-                  "history": _history()}
+        windows = _claude_windows() + _codex_windows()
+        # Host-level resume PATH: reuse a live session's env (it already has codex/
+        # claude on PATH); fall back to scanning nvm/local bins. Used to resume
+        # History sessions that have no live process of their own.
+        path = next((w["env_path"] for w in windows if w.get("env_path")), "") or _fallback_path()
+        result = {"home": HOME, "windows": windows, "history": _history(), "path": path}
     except Exception as e:
-        result = {"error": str(e), "windows": [], "history": []}
+        result = {"error": str(e), "windows": [], "history": [], "path": ""}
     sys.stdout.write(json.dumps(result))
 
 

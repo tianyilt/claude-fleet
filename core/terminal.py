@@ -93,11 +93,18 @@ def session_cli_command(platform: str, session_id: str, cwd: str, fork: bool = F
 
 
 def remote_session_command(ssh: str, platform: str, session_id: str,
-                           cwd: str, fork: bool = False) -> str:
+                           cwd: str, fork: bool = False, env_path: str = "") -> str:
     """Resume/fork a session on a remote host: open a LOCAL terminal that SSHes in
     with a tty (-t) and runs the resume command there. `ssh` is the full prefix
-    (e.g. 'ssh -p 2222 user@host')."""
+    (e.g. 'ssh -p 2222 user@host').
+
+    `env_path` is the remote toolchain PATH (captured from the live session). A
+    non-interactive `ssh host '<cmd>'` runs a shell that never sources the user's
+    profile/nvm, so `codex`/`claude` are usually NOT on PATH — prepend the captured
+    PATH so the binary resolves."""
     inner = session_cli_command(platform, session_id, cwd, fork=fork)
+    if env_path:
+        inner = f"export PATH={shlex.quote(env_path)}:$PATH && {inner}"
     return f"{ssh} -t {shlex.quote(inner)}"
 
 
@@ -192,7 +199,7 @@ def _terminal_command(command: str, cwd: str) -> Optional[list[str]]:
 
 
 def launch_session(platform: str, session_id: str, cwd: str, fork: bool = False,
-                   ssh: Optional[str] = None) -> dict:
+                   ssh: Optional[str] = None, env_path: str = "") -> dict:
     """Launch an interactive CLI session in a real terminal when possible.
 
     Returns {ok: True, action, command, ...} on success, or {ok: False, command,
@@ -202,7 +209,8 @@ def launch_session(platform: str, session_id: str, cwd: str, fork: bool = False,
     """
     cwd = cwd or str(Path.home())
     try:
-        command = (remote_session_command(ssh, platform, session_id, cwd, fork=fork)
+        command = (remote_session_command(ssh, platform, session_id, cwd, fork=fork,
+                                           env_path=env_path)
                    if ssh else session_cli_command(platform, session_id, cwd, fork=fork))
     except ValueError as e:
         return {"ok": False, "error": str(e)}
