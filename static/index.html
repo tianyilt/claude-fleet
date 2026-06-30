@@ -489,11 +489,14 @@
                   class="text-xs px-2 py-1 rounded border transition"
                   :class="w.triage === 'waiting_perm' ? 'border-red-300 text-red-600 hover:bg-red-50 font-medium' : 'border-gray-200 text-gray-600 hover:bg-gray-100'">
             Focus</button>
-          <!-- Remote sessions have no local tty to focus → Resume opens a local
-               terminal that SSHes in. -->
+          <!-- Remote sessions have no local tty to focus → Resume/Fork open a local
+               terminal that SSHes in and resumes/forks there. -->
           <button x-show="w.source && w.source !== 'local'" @click="resumeSession(w)"
                   class="text-xs border border-teal-200 text-teal-600 px-2 py-1 rounded hover:bg-teal-50 transition">
             Resume (ssh)</button>
+          <button x-show="w.source && w.source !== 'local'" @click="forkHistorySession(w)"
+                  class="text-xs border border-green-200 text-green-600 px-2 py-1 rounded hover:bg-green-50 transition">
+            Fork (ssh)</button>
           <!-- No transcript to show for an unidentified codex terminal → hide Timeline. -->
           <button x-show="w.transcript_path || w.platform !== 'codex'" @click="cardTimeline(w)"
                   class="text-xs border border-gray-200 text-gray-600 px-2 py-1 rounded hover:bg-gray-100 transition">

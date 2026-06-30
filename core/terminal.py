@@ -101,10 +101,17 @@ def remote_session_command(ssh: str, platform: str, session_id: str,
     `env_path` is the remote toolchain PATH (captured from the live session). A
     non-interactive `ssh host '<cmd>'` runs a shell that never sources the user's
     profile/nvm, so `codex`/`claude` are usually NOT on PATH — prepend the captured
-    PATH so the binary resolves."""
+    PATH so the binary resolves.
+
+    After the CLI exits we `exec` an interactive login shell so the user STAYS on
+    the remote box (the "ssh in, then run codex" model): a failed resume is
+    debuggable in place and they can keep working instead of being dropped back
+    locally. `;` (not `&&`) before the exec so it runs regardless of the CLI's
+    exit code — even if an earlier step (cd) failed, you still land in a shell."""
     inner = session_cli_command(platform, session_id, cwd, fork=fork)
     if env_path:
         inner = f"export PATH={shlex.quote(env_path)}:$PATH && {inner}"
+    inner = f"{inner}; exec ${{SHELL:-/bin/sh}} -l"
     return f"{ssh} -t {shlex.quote(inner)}"
 
 

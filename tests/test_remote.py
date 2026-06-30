@@ -149,12 +149,27 @@ def test_remote_session_command_codex():
     assert cmd.startswith("ssh -p 2222 user@host -t ")
     assert "codex resume abc" in cmd
     assert "/home/x/repo" in cmd
+    # lands in a remote login shell after the CLI exits (stay-on-the-box model)
+    assert "; exec ${SHELL:-/bin/sh} -l" in cmd
+
+
+def test_remote_session_command_fork_stays_in_shell():
+    cmd = terminal.remote_session_command("ssh box", "codex", "abc", "/r", fork=True)
+    assert "codex fork abc" in cmd
+    assert cmd.rstrip("'").endswith("; exec ${SHELL:-/bin/sh} -l")
 
 
 def test_remote_session_command_claude_fork():
     cmd = terminal.remote_session_command("ssh box", "claude", "abc", "/r", fork=True)
     assert "claude --resume abc --fork-session" in cmd
     assert cmd.startswith("ssh box -t ")
+    assert "; exec ${SHELL:-/bin/sh} -l" in cmd
+
+
+def test_local_session_command_has_no_exec_shell_tail():
+    """The exec-shell tail is remote-only; a local resume must not carry it."""
+    cmd = terminal.session_cli_command("codex", "abc", "/r")
+    assert "exec ${SHELL" not in cmd and cmd == "cd /r && codex resume abc"
 
 
 def test_remote_session_command_exports_env_path():
