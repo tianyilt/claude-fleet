@@ -183,14 +183,24 @@ def cached_windows() -> list[dict]:
     with _lock:
         items = [(n, e) for n, e in CACHE.items()]
     for name, e in items:
+        # When the last poll failed we're showing the LAST-GOOD snapshot — the
+        # processes may be long gone. Flag those cards `stale` so the board doesn't
+        # present hours-old cache as live truth.
+        stale = not e.get("ok", True)
+        stale_age = max(0, int((now - (e.get("ts", 0) or 0)) / 1000)) if e.get("ts") else None
         for w in e.get("windows", []):
             cwd = w.get("cwd", "")
             updated = w.get("updated_at", 0) or 0
             idle = max(0, int((now - updated) / 1000)) if updated else None
             # Same honest rule as local codex: recent transcript write = generating.
             from .codex import CODEX_WORKING_IDLE_SEC
-            triage = ("working" if (idle is not None and idle < CODEX_WORKING_IDLE_SEC)
-                      else "idle")
+            if stale:
+                triage = "stale"
+                reason = f"{name} · 离线,缓存数据" + (f"(≈{stale_age // 60}分钟前)" if stale_age else "")
+            else:
+                triage = ("working" if (idle is not None and idle < CODEX_WORKING_IDLE_SEC)
+                          else "idle")
+                reason = f"{name} · {'active' if triage == 'working' else 'idle'}"
             out.append({
                 "pid": w.get("pid", 0), "session_id": w.get("session_id", ""),
                 "cwd": cwd, "project_name": cwd.rsplit("/", 1)[-1] or name,
@@ -202,9 +212,9 @@ def cached_windows() -> list[dict]:
                 "transcript_path": w.get("transcript_path"), "alive": True,
                 "platform": w.get("platform", "codex"), "model": w.get("model", ""),
                 "idle_seconds": idle,
-                "source": name,
+                "source": name, "stale": stale,
                 "triage": triage,
-                "triage_reason": f"{name} · {'active' if triage=='working' else 'idle'}",
+                "triage_reason": reason,
                 "triage_suggestion": "",
                 "current_task": None, "skills_used": [], "memory_ops": [],
                 "background_tasks": [], "permission_msg": None, "permission_ts": None,

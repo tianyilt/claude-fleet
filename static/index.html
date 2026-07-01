@@ -16,6 +16,7 @@
   .triage-completed { background-color: #3b82f6; }
   .triage-closeable { background-color: #9ca3af; }
   .triage-idle { background-color: #cbd5e1; }
+  .triage-stale { background-color: #d1d5db; opacity: 0.6; }
   pre { white-space: pre-wrap; word-break: break-all; }
   .toast-enter { animation: slideIn .3s ease-out; }
   @keyframes slideIn { from{transform:translateY(1rem);opacity:0} to{transform:translateY(0);opacity:1} }
@@ -433,7 +434,7 @@
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
     <template x-for="w in filteredWindows" :key="w.pid">
       <div class="bg-white rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer relative"
-           :class="{ 'ring-2 ring-red-400': w.triage === 'waiting_perm', 'ring-2 ring-blue-400': expandedPid === w.pid }"
+           :class="{ 'ring-2 ring-red-400': w.triage === 'waiting_perm', 'ring-2 ring-blue-400': expandedPid === w.pid, 'opacity-60': w.stale }"
            @click="cardTimeline(w)">
         <div class="p-4 pb-2">
           <div class="flex items-center gap-2 mb-1">
@@ -444,6 +445,9 @@
             <span x-show="w.source && w.source !== 'local'"
                   class="text-[10px] px-1.5 rounded shrink-0 bg-teal-100 text-teal-700"
                   :title="'remote server: ' + w.source" x-text="'⮬ ' + w.source"></span>
+            <span x-show="w.stale"
+                  class="text-[10px] px-1.5 rounded shrink-0 bg-gray-200 text-gray-600"
+                  title="服务器连不上,这是上次成功采集的缓存,进程可能已退出">⚠ 离线·缓存</span>
             <span class="text-[10px] px-1.5 rounded-full text-white shrink-0" :class="'triage-' + w.triage"
                   x-text="w.triage"></span>
           </div>
@@ -452,6 +456,11 @@
         <div class="px-4 pb-2 text-xs space-y-1">
           <div class="text-gray-600 truncate" x-show="w.current_task" x-text="w.current_task"></div>
           <div class="text-gray-500 italic" x-text="w.triage_reason"></div>
+          <!-- How long it's been blocked waiting for approval — a 2h-old prompt you
+               forgot reads very differently from one that just popped up. -->
+          <div x-show="w.triage === 'waiting_perm' && w.idle_seconds != null"
+               class="text-red-600 font-medium"
+               x-text="'⏳ 已等待批准 ' + formatIdle(w.idle_seconds).replace(' ago','')"></div>
           <!-- Review verdict -->
           <div x-show="reviewVerdicts[w.pid]"
                class="bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-800 max-h-32 overflow-y-auto whitespace-pre-wrap"

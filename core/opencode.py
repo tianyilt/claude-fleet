@@ -9,6 +9,13 @@ from typing import Optional
 
 from .sessions import HOME_BASE
 
+_SEARCH_CAP = 20_000   # full searchable body per event (matches transcripts.SEARCH_CAP)
+
+
+def _search_cap(s: str) -> str:
+    s = s or ""
+    return s if len(s) <= _SEARCH_CAP else s[:_SEARCH_CAP]
+
 
 def _opencode_db() -> Path:
     """OpenCode SQLite path. XDG-style on POSIX, %LOCALAPPDATA% on Windows."""
@@ -119,21 +126,27 @@ def opencode_timeline(session_id: str, limit: int = 2000) -> list[dict]:
             if not text.strip():
                 continue
             kind = "user_text" if role == "user" else "assistant_text"
-            events.append({"ts": ts, "kind": kind, "text": text[:4000], "tool": None, "role": role or "assistant", "extra": {}})
+            events.append({"ts": ts, "kind": kind, "text": text[:4000], "tool": None, "role": role or "assistant",
+                           "extra": {}, "search_text": _search_cap(text)})
 
         elif ptype == "tool":
             tool_name = pd.get("tool", "")
             state = pd.get("state") or {}
             inp = state.get("input") or {}
             status = state.get("status", "")
+            try:
+                inp_full = json.dumps(inp, ensure_ascii=False)
+            except Exception:
+                inp_full = str(inp)
             if status == "completed" and state.get("output"):
                 events.append({"ts": ts, "kind": "tool_use", "text": "", "tool": tool_name, "role": "assistant",
-                               "extra": _tool_preview(tool_name, inp)})
-                output = (state.get("output") or "")[:200]
-                events.append({"ts": ts, "kind": "tool_result", "text": output, "tool": None, "role": "user", "extra": {}})
+                               "extra": _tool_preview(tool_name, inp), "search_text": _search_cap(inp_full)})
+                out_full = state.get("output") or ""
+                events.append({"ts": ts, "kind": "tool_result", "text": out_full[:200], "tool": None,
+                               "role": "user", "extra": {}, "search_text": _search_cap(out_full)})
             elif status == "running" or not state.get("output"):
                 events.append({"ts": ts, "kind": "tool_use", "text": "", "tool": tool_name, "role": "assistant",
-                               "extra": _tool_preview(tool_name, inp)})
+                               "extra": _tool_preview(tool_name, inp), "search_text": _search_cap(inp_full)})
 
         elif ptype == "reasoning":
             continue

@@ -124,6 +124,24 @@ def test_cached_windows_source_tagged(remotes_file):
     assert w["triage"] in ("working", "idle")
 
 
+def test_cached_windows_marks_stale_when_unreachable(remotes_file):
+    # last poll failed → windows are last-good cache, must be flagged stale so the
+    # board doesn't present hours-old processes as live.
+    remote.CACHE["srv1"] = {"ok": False, "error": "tunnel down", "ts": 1,
+                            "windows": [{"platform": "codex", "session_id": "s1",
+                                         "cwd": "/r", "updated_at": 0}], "history": []}
+    w = remote.cached_windows()[0]
+    assert w["stale"] is True and w["triage"] == "stale"
+    assert "离线" in w["triage_reason"]
+
+
+def test_cached_windows_not_stale_when_ok(remotes_file):
+    remote.CACHE["srv1"] = {"ok": True, "ts": 1, "windows": [
+        {"platform": "codex", "session_id": "s1", "cwd": "/r", "updated_at": 0}], "history": []}
+    w = remote.cached_windows()[0]
+    assert w["stale"] is False and w["triage"] in ("working", "idle")
+
+
 def test_cached_history_source_tagged(remotes_file):
     remote.CACHE["srv1"] = {"ok": True, "windows": [], "history": [
         {"session_id": "h1", "platform": "codex", "first_input": "x",
