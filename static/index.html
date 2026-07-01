@@ -645,9 +645,28 @@
       <pre class="text-xs text-gray-700 max-h-48 overflow-y-auto whitespace-pre-wrap bg-gray-50 rounded p-2"
            x-text="memoryDetail?.content || '(loading...)'"></pre>
     </div>
+    <!-- in-session search: locate which event a string (e.g. "89/89") lives in -->
+    <div x-show="(timelineData?.events || []).length" class="flex items-center gap-2 mb-2">
+      <div class="relative flex-1">
+        <input x-model="timelineQuery" @input.debounce.150ms="runTimelineSearch()"
+               @keydown.enter.prevent="timelineJump(1)"
+               @keydown.escape="resetTimelineSearch()"
+               type="text" placeholder="在这个 session 里搜索…（回车跳下一个）"
+               class="w-full border rounded-lg pl-3 pr-8 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400">
+        <button x-show="timelineQuery" @click="resetTimelineSearch()"
+                class="absolute right-2 top-1.5 text-gray-400 hover:text-gray-700 text-sm">&times;</button>
+      </div>
+      <div x-show="timelineQuery" class="flex items-center gap-1 text-xs text-gray-500 shrink-0">
+        <span x-text="timelineHitList.length ? (timelineHitPos + 1) + '/' + timelineHitList.length : '0 匹配'"></span>
+        <button @click="timelineJump(-1)" :disabled="!timelineHitList.length"
+                class="border rounded px-1.5 py-0.5 hover:bg-gray-100 disabled:opacity-40" title="上一个">↑</button>
+        <button @click="timelineJump(1)" :disabled="!timelineHitList.length"
+                class="border rounded px-1.5 py-0.5 hover:bg-gray-100 disabled:opacity-40" title="下一个">↓</button>
+      </div>
+    </div>
     <div class="space-y-2 max-h-[32rem] overflow-y-auto">
       <template x-for="(ev, idx) in (timelineData?.events || [])" :key="idx">
-        <div :id="'tl-ev-'+idx" class="text-sm border-l-2 pl-3 py-1"
+        <div :id="'tl-ev-'+idx" class="text-sm border-l-2 pl-3 py-1 rounded-r transition-colors"
              :class="{
                'border-blue-400': ev.kind==='user_text',
                'border-emerald-400': ev.kind==='assistant_text',
@@ -655,7 +674,9 @@
                'border-purple-500': ev.kind==='skill_invoke',
                'border-sky-400 border-dashed': ev.kind==='memory_read',
                'border-pink-500': ev.kind==='memory_write',
-               'border-gray-300': ev.kind==='tool_result'||ev.kind==='system'
+               'border-gray-300': ev.kind==='tool_result'||ev.kind==='system',
+               'bg-yellow-50': timelineHits[idx],
+               'ring-2 ring-yellow-400': idx === timelineHitList[timelineHitPos]
              }">
           <div class="flex items-center gap-2 text-xs text-gray-400 mb-0.5">
             <span x-text="ev.ts?.slice(11,19) || ''"></span>
@@ -695,7 +716,7 @@
             </div>
           </template>
           <template x-if="ev.kind !== 'tool_use'">
-            <pre class="text-xs text-gray-700 max-h-32 overflow-y-auto" x-text="ev.text?.slice(0,2000) || ''"></pre>
+            <pre class="text-xs text-gray-700 max-h-32 overflow-y-auto" x-html="hlText(ev.text?.slice(0,2000) || '')"></pre>
           </template>
         </div>
       </template>
@@ -879,6 +900,10 @@ function fleet() {
     expandedHistoryId: null,
     timelineData: null,
     planData: null,
+    timelineQuery: '',
+    timelineHits: {},        // {eventIdx: true} for O(1) highlight lookup
+    timelineHitList: [],     // ordered matching event indices
+    timelineHitPos: -1,      // cursor into timelineHitList
     toasts: [],
     evtSource: null,
     lastEventAt: Date.now(),
@@ -980,7 +1005,16 @@ function fleet() {
       else if (h === 'servers') { this.showServers = true; this.loadRemotes(); }
       else if (h === 'memory') { this.showMemory = true; this.loadMemory(); }
       else if (h.startsWith('search=')) { this.searchQuery = h.slice(7); this.doSearch(); }
-      else if (h.startsWith('timeline=')) { this.openHistoryTimeline(h.slice(9)); }
+      else if (h.startsWith('timeline=')) {
+        // #timeline=<sid>[&q=<term>] — optional query jumps straight to a hit
+        const rest = h.slice(9);
+        const amp = rest.indexOf('&q=');
+        const sid = amp < 0 ? rest : rest.slice(0, amp);
+        const q = amp < 0 ? '' : rest.slice(amp + 3);
+        Promise.resolve(this.openHistoryTimeline(sid)).then(() => {
+          if (q) { this.timelineQuery = q; this.runTimelineSearch(); }
+        });
+      }
     },
 
     applySnapshot(snap) {
@@ -1121,6 +1155,7 @@ function fleet() {
       this.expandedHistoryId = null;
       this.planData = null;
       this.showPlanHistory = false;
+      this.resetTimelineSearch();
       const r = await fetch(`/api/windows/${pid}/timeline`);
       this.timelineData = await r.json();
       this.$nextTick(() => this.$refs.timelinePanel?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
@@ -1194,10 +1229,60 @@ function fleet() {
       } catch (e) { /* facets are optional */ }
     },
 
+    // --- in-session timeline search (find which event a string lives in) ---
+    resetTimelineSearch() {
+      this.timelineQuery = ''; this.timelineHits = {};
+      this.timelineHitList = []; this.timelineHitPos = -1;
+    },
+    runTimelineSearch() {
+      const q = (this.timelineQuery || '').trim().toLowerCase();
+      const hits = {}, list = [];
+      if (q) {
+        (this.timelineData?.events || []).forEach((ev, i) => {
+          const hay = ((ev.text || '') + ' ' + (ev.tool || '') + ' ' +
+                       JSON.stringify(ev.extra || {})).toLowerCase();
+          if (hay.includes(q)) { hits[i] = true; list.push(i); }
+        });
+      }
+      this.timelineHits = hits; this.timelineHitList = list;
+      this.timelineHitPos = list.length ? 0 : -1;
+      if (list.length) this.scrollToEvent(list[0]);
+    },
+    scrollToEvent(i) {
+      this.$nextTick(() => document.getElementById('tl-ev-' + i)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    },
+    timelineJump(dir) {
+      const n = this.timelineHitList.length;
+      if (!n) return;
+      this.timelineHitPos = (this.timelineHitPos + dir + n) % n;
+      this.scrollToEvent(this.timelineHitList[this.timelineHitPos]);
+    },
+    // escape + wrap query matches in <mark> (used via x-html on the event text)
+    hlText(text) {
+      const esc = s => s.replace(/[&<>"]/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      let rest = String(text || '');
+      const q = (this.timelineQuery || '').trim();
+      if (!q) return esc(rest);
+      const ql = q.toLowerCase();
+      let out = '';
+      while (true) {
+        const idx = rest.toLowerCase().indexOf(ql);
+        if (idx < 0) { out += esc(rest); break; }
+        out += esc(rest.slice(0, idx)) +
+               '<mark class="bg-yellow-300 rounded px-0.5">' +
+               esc(rest.slice(idx, idx + q.length)) + '</mark>';
+        rest = rest.slice(idx + q.length);
+      }
+      return out;
+    },
+
     async openHistoryTimeline(sessionId, source = '') {
       this.expandedPid = null;
       this.expandedHistoryId = sessionId;
       this.planData = null;
+      this.resetTimelineSearch();
       const q = source && source !== 'local' ? `?source=${encodeURIComponent(source)}` : '';
       const r = await fetch(`/api/history/${sessionId}/timeline${q}`);
       if (r.ok) {
