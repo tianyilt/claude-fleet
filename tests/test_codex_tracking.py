@@ -52,8 +52,10 @@ def test_codex_window_real_identity_when_lsof_confirms(monkeypatch):
     codex._pid_rollout.clear()
     monkeypatch.setattr(codex, "_running_codex_pids", lambda: [4242])
     monkeypatch.setattr(codex, "_pid_files", lambda pid: ("/w", "/open.jsonl"))
+    # Return a fixed transcript_path, not str(f): Path("/open.jsonl") stringifies to
+    # "\open.jsonl" on Windows, which would fail the assertion for a non-bug reason.
     monkeypatch.setattr(codex, "_build_codex_session",
-                        lambda f: _mk_cs("sid-A", str(f), "play slay the spire"))
+                        lambda f: _mk_cs("sid-A", "/open.jsonl", "play slay the spire"))
     monkeypatch.setattr("core.sessions.get_tty", lambda pid: "/dev/ttys9")
     ws = codex.list_codex_windows()
     assert len(ws) == 1

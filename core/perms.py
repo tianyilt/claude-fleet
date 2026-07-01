@@ -93,7 +93,7 @@ def recent_events(limit: int = 50) -> list[PermEvent]:
     mtime = FOCUS_LOG.stat().st_mtime
     out: list[PermEvent] = []
     try:
-        text = FOCUS_LOG.read_text(errors="replace")
+        text = FOCUS_LOG.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return []
     for line in text.splitlines()[-limit * 2 :]:

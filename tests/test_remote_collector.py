@@ -19,9 +19,12 @@ def _write(p: Path, obj) -> None:
 
 def _run(home: Path) -> dict:
     env = dict(os.environ, HOME=str(home))
-    src = COLLECTOR.read_text()
+    # utf-8 explicitly: the collector source is UTF-8 (non-ASCII title helpers),
+    # so reading it and piping it to the child must not use the platform default
+    # codec (cp1252 on Windows → UnicodeDecodeError).
+    src = COLLECTOR.read_text(encoding="utf-8")
     proc = subprocess.run([sys.executable, "-"], input=src, env=env,
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 

@@ -34,7 +34,7 @@ CACHE: dict[str, dict] = {}
 
 def load_remotes() -> list[dict]:
     try:
-        data = json.loads(REMOTES_PATH.read_text())
+        data = json.loads(REMOTES_PATH.read_text(encoding="utf-8"))
         out = []
         for r in data.get("remotes", []):
             if r.get("name") and r.get("ssh"):
@@ -46,7 +46,7 @@ def load_remotes() -> list[dict]:
 
 def save_remotes(remotes: list[dict]) -> None:
     REMOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REMOTES_PATH.write_text(json.dumps({"remotes": remotes}, indent=2))
+    REMOTES_PATH.write_text(json.dumps({"remotes": remotes}, indent=2), encoding="utf-8")
 
 
 def add_remote(name: str, ssh: str) -> list[dict]:
@@ -83,13 +83,16 @@ def resume_path(source: str) -> str:
 
 def collect(remote: dict) -> dict:
     """Run the collector on the remote, return parsed {windows, history, home}."""
-    src = _COLLECTOR.read_text()
+    # utf-8 throughout: the collector source carries non-ASCII (title helpers), and
+    # its JSON output can too — never let the platform's default codec (cp1252 on
+    # Windows) decide, or it raises UnicodeDecodeError.
+    src = _COLLECTOR.read_text(encoding="utf-8")
     args = shlex.split(remote["ssh"]) + [
         # BatchMode so a missing key fails fast instead of hanging on a prompt.
         "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "python3", "-",
     ]
     proc = subprocess.run(args, input=src, capture_output=True, text=True,
-                          timeout=POLL_TIMEOUT)
+                          encoding="utf-8", timeout=POLL_TIMEOUT)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "ssh failed").strip()[:300])
     return json.loads(proc.stdout)
@@ -107,10 +110,11 @@ def remote_timeline(source: str, transcript_path: str, platform: str,
         raise RuntimeError(f"remote '{source}' not registered")
     args = shlex.split(ssh) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                                "cat", shlex.quote(transcript_path)]
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=POLL_TIMEOUT)
+    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+                          timeout=POLL_TIMEOUT)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "cat failed").strip()[:200])
-    tmp = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8")
     try:
         tmp.write(proc.stdout)
         tmp.close()

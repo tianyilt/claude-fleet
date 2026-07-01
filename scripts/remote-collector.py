@@ -79,7 +79,7 @@ def _slug(cwd):
 
 def _first_json_line(path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.loads(f.readline())
     except Exception:
         return None
@@ -89,7 +89,7 @@ def _first_json_line(path):
 
 def _claude_first_user(path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 try:
                     d = json.loads(line)
@@ -117,7 +117,7 @@ def _claude_windows():
         if os.path.basename(f).startswith("session-"):
             continue
         try:
-            with open(f) as fh:
+            with open(f, encoding="utf-8") as fh:
                 d = json.load(fh)
         except Exception:
             continue
@@ -184,7 +184,7 @@ def _codex_first_user(path):
     first_user = ""
     seen = 0
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 try:
                     d = json.loads(line)
