@@ -675,6 +675,7 @@
                'border-sky-400 border-dashed': ev.kind==='memory_read',
                'border-pink-500': ev.kind==='memory_write',
                'border-gray-300': ev.kind==='tool_result'||ev.kind==='system',
+               'border-indigo-300 border-dashed': ev.kind==='thinking'||ev.kind==='reasoning',
                'bg-yellow-50': timelineHits[idx],
                'ring-2 ring-yellow-400': idx === timelineHitList[timelineHitPos]
              }">
@@ -690,9 +691,9 @@
               <span class="text-pink-600 font-medium">mem↑ <span x-text="ev.tool"></span></span>
             </template>
             <template x-if="ev.kind!=='skill_invoke' && ev.kind!=='memory_read' && ev.kind!=='memory_write'">
-              <span :class="{'text-blue-600': ev.kind==='user_text', 'text-emerald-600': ev.kind==='assistant_text', 'text-amber-600': ev.kind==='tool_use', 'text-gray-500': true}"
+              <span :class="{'text-blue-600': ev.kind==='user_text', 'text-emerald-600': ev.kind==='assistant_text', 'text-amber-600': ev.kind==='tool_use', 'text-indigo-500': ev.kind==='thinking'||ev.kind==='reasoning', 'text-gray-500': true}"
                     class="font-medium"
-                    x-text="ev.kind==='tool_use' ? ev.tool : ev.kind.replace('_text','').replace('tool_result','result')"></span>
+                    x-text="ev.kind==='tool_use' ? ev.tool : (ev.kind==='thinking' ? '💭 thinking' : ev.kind.replace('_text','').replace('tool_result','result'))"></span>
             </template>
             <button x-show="ev.uuid && (!timelineData?.platform || timelineData.platform==='claude')"
                     @click.stop="forkFromEvent(ev.uuid)"
@@ -717,6 +718,19 @@
           </template>
           <template x-if="ev.kind !== 'tool_use'">
             <pre class="text-xs text-gray-700 max-h-32 overflow-y-auto" x-html="hlText(ev.text?.slice(0,2000) || '')"></pre>
+          </template>
+          <!-- Full body: search hits (plan docs, long tool output, thinking) often
+               live past the truncated preview; expand shows the whole highlighted
+               body. The current search hit auto-expands so ↑↓ lands on the word. -->
+          <template x-if="ev.search_text && ev.search_text.length > (ev.text||'').length + 4">
+            <div class="mt-0.5">
+              <button @click.stop="toggleEventExpand(idx)"
+                      class="text-[10px] text-gray-400 hover:text-indigo-600 transition"
+                      x-text="isEventExpanded(idx) ? '▲ 收起' : ('▼ 展开完整 ('+ev.search_text.length+' 字)')"></button>
+              <pre x-show="isEventExpanded(idx)"
+                   class="text-xs text-gray-700 max-h-96 overflow-y-auto mt-1 bg-gray-50 rounded p-2 whitespace-pre-wrap"
+                   x-html="hlText(ev.search_text)"></pre>
+            </div>
           </template>
         </div>
       </template>
@@ -904,6 +918,7 @@ function fleet() {
     timelineHits: {},        // {eventIdx: true} for O(1) highlight lookup
     timelineHitList: [],     // ordered matching event indices
     timelineHitPos: -1,      // cursor into timelineHitList
+    expandedEvents: {},      // {eventIdx: bool} manual expand override for full body
     toasts: [],
     evtSource: null,
     lastEventAt: Date.now(),
@@ -1233,24 +1248,42 @@ function fleet() {
     resetTimelineSearch() {
       this.timelineQuery = ''; this.timelineHits = {};
       this.timelineHitList = []; this.timelineHitPos = -1;
+      this.expandedEvents = {};
     },
     runTimelineSearch() {
       const q = (this.timelineQuery || '').trim().toLowerCase();
       const hits = {}, list = [];
       if (q) {
         (this.timelineData?.events || []).forEach((ev, i) => {
-          const hay = ((ev.text || '') + ' ' + (ev.tool || '') + ' ' +
+          // search the FULL body (search_text), not just the truncated preview —
+          // matches what History full-text search finds (plan docs, long output).
+          const hay = ((ev.search_text || ev.text || '') + ' ' + (ev.tool || '') + ' ' +
                        JSON.stringify(ev.extra || {})).toLowerCase();
           if (hay.includes(q)) { hits[i] = true; list.push(i); }
         });
       }
       this.timelineHits = hits; this.timelineHitList = list;
       this.timelineHitPos = list.length ? 0 : -1;
+      this.expandedEvents = {};       // let auto-expand of the current hit take over
       if (list.length) this.scrollToEvent(list[0]);
     },
+    // A matched word may live past the truncated preview; expand shows the full
+    // (highlighted) body. The current hit auto-expands so ↑↓ lands on visible text.
+    isEventExpanded(idx) {
+      const m = this.expandedEvents[idx];
+      if (m !== undefined) return m;
+      return idx === this.timelineHitList[this.timelineHitPos];
+    },
+    toggleEventExpand(idx) {
+      this.expandedEvents = { ...this.expandedEvents, [idx]: !this.isEventExpanded(idx) };
+    },
     scrollToEvent(i) {
-      this.$nextTick(() => document.getElementById('tl-ev-' + i)
-        ?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+      this.$nextTick(() => {
+        const el = document.getElementById('tl-ev-' + i);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // after the auto-expanded body renders, bring its first highlight into view
+        setTimeout(() => el?.querySelector('mark')?.scrollIntoView({ block: 'center' }), 80);
+      });
     },
     timelineJump(dir) {
       const n = this.timelineHitList.length;

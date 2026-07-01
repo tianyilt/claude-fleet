@@ -10,16 +10,31 @@ from typing import Iterable, Optional
 
 from .sessions import PROJECTS_DIR
 
+# `text` stays a compact preview for display; `search_text` carries the FULL body
+# so in-session search matches everything History's full-text search matches (plan
+# docs, long tool output, thinking) — capped per event to bound the payload.
+SEARCH_CAP = 20_000            # max search_text chars per event
+TOTAL_SEARCH_CAP = 8_000_000   # max cumulative search_text bytes per timeline response
+# Big enough to read a whole transcript (so early events stay searchable, not just
+# the tail); beyond this we fall back to tailing to avoid loading a giant file.
+FULL_READ_MAX_BYTES = 20_000_000
+
+
+def _cap(s: str) -> str:
+    s = s or ""
+    return s if len(s) <= SEARCH_CAP else s[:SEARCH_CAP]
+
 
 @dataclass
 class TurnEvent:
     ts: str
-    kind: str            # user_text | assistant_text | tool_use | tool_result | system
-    text: str            # ≤ 4 KB excerpt
+    kind: str            # user_text | assistant_text | tool_use | tool_result | thinking | system
+    text: str            # ≤ 4 KB display excerpt
     tool: Optional[str]  # name of tool when kind == tool_use
     role: str            # user | assistant | system
     extra: dict          # small structured payload (e.g. tool input keys)
     uuid: str = ""       # source JSONL line uuid (for fork-at-node); "" if unknown
+    search_text: str = ""  # full searchable body (capped); "" ⇒ fall back to text
 
 
 def _iter_lines(path: Path) -> Iterable[dict]:
@@ -64,14 +79,17 @@ def _flatten_assistant(msg: dict) -> list[TurnEvent]:
     content = msg.get("content") or []
     ts = msg.get("timestamp") or ""
     if isinstance(content, str):
-        out.append(TurnEvent(ts, "assistant_text", content[:4000], None, "assistant", {}))
+        out.append(TurnEvent(ts, "assistant_text", content[:4000], None, "assistant", {},
+                             search_text=_cap(content)))
         return out
     if not isinstance(content, list):
         return out
     for c in content:
         ct = c.get("type")
         if ct == "text":
-            out.append(TurnEvent(ts, "assistant_text", (c.get("text") or "")[:4000], None, "assistant", {}))
+            full = c.get("text") or ""
+            out.append(TurnEvent(ts, "assistant_text", full[:4000], None, "assistant", {},
+                                 search_text=_cap(full)))
         elif ct == "tool_use":
             inp = c.get("input") or {}
             tool_name = c.get("name", "")
@@ -82,6 +100,7 @@ def _flatten_assistant(msg: dict) -> list[TurnEvent]:
                 out.append(TurnEvent(
                     ts, "skill_invoke", "", skill_name, "assistant",
                     {"args": (inp.get("args") or "")[:200]},
+                    search_text=_cap(str(inp.get("args") or "")),
                 ))
             elif tool_name in ("Read", "Write", "Edit") and "/memory/" in file_path:
                 mem_name = file_path.rsplit("/", 1)[-1].replace(".md", "")
@@ -89,6 +108,7 @@ def _flatten_assistant(msg: dict) -> list[TurnEvent]:
                 out.append(TurnEvent(
                     ts, kind, "", mem_name, "assistant",
                     {"operation": tool_name.lower(), "path": file_path},
+                    search_text=_cap(str(inp.get("content") or inp.get("new_string") or "")),
                 ))
             else:
                 preview: dict = {}
@@ -101,35 +121,62 @@ def _flatten_assistant(msg: dict) -> list[TurnEvent]:
                         preview[k] = f"<{type(v).__name__}>"
                     if len(preview) >= 6:
                         break
-                out.append(TurnEvent(ts, "tool_use", "", tool_name, "assistant", preview))
+                # Full input carries e.g. a Write/Edit `content` (plan doc body) that
+                # the 6-key/200-char preview drops — searchable, not displayed.
+                try:
+                    full_in = json.dumps(inp, ensure_ascii=False)
+                except Exception:
+                    full_in = str(inp)
+                out.append(TurnEvent(ts, "tool_use", "", tool_name, "assistant", preview,
+                                     search_text=_cap(full_in)))
         elif ct == "thinking":
-            # Skip thinking — too noisy for dashboard.
-            continue
+            # Kept now (searchable): compact preview for display, full for search.
+            full = c.get("thinking") or c.get("text") or ""
+            if full.strip():
+                out.append(TurnEvent(ts, "thinking", full[:2000], None, "assistant", {},
+                                     search_text=_cap(full)))
     return out
 
 
-def _flatten_user(msg: dict) -> list[TurnEvent]:
+def _flatten_user(msg: dict, outer: Optional[dict] = None) -> list[TurnEvent]:
     out: list[TurnEvent] = []
     content = msg.get("content") or []
     ts = msg.get("timestamp") or ""
+    # Claude echoes the full tool result out-of-band under the record's top-level
+    # `toolUseResult` (file.content / originalFile / stdout). `content` only holds a
+    # trimmed view, so a needle can live only here — fold it into the result's search.
+    extra_full = ""
+    tur = (outer or {}).get("toolUseResult")
+    if isinstance(tur, dict):
+        f = tur.get("file") or {}
+        parts = [f.get("content"), f.get("originalFile"), tur.get("stdout"),
+                 tur.get("stderr"), tur.get("output")]
+        extra_full = "\n".join(str(p) for p in parts if isinstance(p, str) and p)
+    elif isinstance(tur, str):
+        extra_full = tur
     if isinstance(content, str):
-        out.append(TurnEvent(ts, "user_text", content[:4000], None, "user", {}))
+        out.append(TurnEvent(ts, "user_text", content[:4000], None, "user", {},
+                             search_text=_cap(content)))
         return out
     if not isinstance(content, list):
         return out
     for c in content:
         ct = c.get("type")
         if ct == "text":
-            out.append(TurnEvent(ts, "user_text", (c.get("text") or "")[:4000], None, "user", {}))
+            full = c.get("text") or ""
+            out.append(TurnEvent(ts, "user_text", full[:4000], None, "user", {},
+                                 search_text=_cap(full)))
         elif ct == "tool_result":
-            # Sensitive: don't dump full stdout. Just first 200 chars.
+            # Display stays a 200-char preview; search covers the full output.
             content_val = c.get("content")
             if isinstance(content_val, list):
-                text_parts = [x.get("text", "") for x in content_val if isinstance(x, dict)]
-                snippet = " ".join(text_parts)[:200]
+                full = " ".join(x.get("text", "") for x in content_val if isinstance(x, dict))
             else:
-                snippet = str(content_val)[:200]
-            out.append(TurnEvent(ts, "tool_result", snippet, None, "user", {}))
+                full = str(content_val)
+            if extra_full and extra_full not in full:
+                full = (full + "\n" + extra_full) if full else extra_full
+            out.append(TurnEvent(ts, "tool_result", full[:200], None, "user", {},
+                                 search_text=_cap(full)))
     return out
 
 
@@ -142,7 +189,7 @@ def _normalize(d: dict) -> list[TurnEvent]:
     if t == "assistant":
         events = _flatten_assistant(msg)
     elif t == "user":
-        events = _flatten_user(msg)
+        events = _flatten_user(msg, d)
     elif t in {"system", "permission-mode"}:
         events = [TurnEvent(
             d.get("timestamp", ""), "system",
@@ -208,16 +255,44 @@ def fork_transcript_at(session_id: str, target_uuid: str) -> tuple[str, str]:
 
 
 def timeline(path: str | Path, limit: int = 50) -> list[dict]:
-    """Return ≤ limit most recent flattened turn events for a transcript."""
+    """Return ≤ limit most recent flattened turn events for a transcript.
+
+    Each event carries a full `search_text` (capped) so in-session search matches
+    everything History's full-text search does. To keep early events searchable we
+    read the whole file when it's reasonably sized, tailing only huge ones. A
+    cumulative search_text budget (newest-first) bounds the response payload.
+    """
     p = Path(path)
     if not p.exists():
         return []
-    # Read more lines than needed because one jsonl row can expand into several events.
-    raw = _tail_lines(p, max(limit * 2, 100))
+    try:
+        small = p.stat().st_size <= FULL_READ_MAX_BYTES
+    except OSError:
+        small = False
+    if small:
+        raw = list(_iter_lines(p))
+    else:
+        # One jsonl row can expand into several events, so over-read the tail.
+        raw = _tail_lines(p, max(limit * 2, 100))
     events: list[TurnEvent] = []
     for d in raw:
         events.extend(_normalize(d))
-    return [e.__dict__ for e in events[-limit:]]
+    events = events[-limit:]
+    # Attach search_text newest-first until the budget is spent; older events then
+    # fall back to their (already truncated) `text` for search.
+    budget = TOTAL_SEARCH_CAP
+    truncated = False
+    for e in reversed(events):
+        if e.search_text:
+            if budget <= 0:
+                e.search_text = ""
+                truncated = True
+            else:
+                budget -= len(e.search_text)
+    out = [e.__dict__ for e in events]
+    if truncated and out:
+        out[0]["search_truncated"] = True
+    return out
 
 
 def current_task_hint(path: str | Path) -> Optional[str]:

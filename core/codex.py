@@ -586,8 +586,19 @@ def codex_current_task(path: str | Path) -> Optional[str]:
     return result
 
 
+_SEARCH_CAP = 20_000   # full searchable body per event (matches transcripts.SEARCH_CAP)
+
+
+def _search_cap(s: str) -> str:
+    s = s or ""
+    return s if len(s) <= _SEARCH_CAP else s[:_SEARCH_CAP]
+
+
 def codex_timeline(path: str | Path, limit: int = 60) -> list[dict]:
-    """Parse Codex JSONL into TurnEvent-compatible dicts."""
+    """Parse Codex JSONL into TurnEvent-compatible dicts.
+
+    Each event carries a full `search_text` (capped) so in-session search matches
+    the whole tool output / message, not just the truncated `text` preview."""
     p = Path(path)
     if not p.exists():
         return []
@@ -618,26 +629,30 @@ def codex_timeline(path: str | Path, limit: int = 60) -> list[dict]:
                         events.append({
                             "ts": ts, "kind": "user_text",
                             "text": text[:4000], "tool": None,
-                            "role": "user", "extra": {},
+                            "role": "user", "extra": {}, "search_text": _search_cap(text),
                         })
 
                 elif t == "response_item":
                     item_type = payload.get("type", "")
                     if item_type == "function_call":
+                        args = payload.get("arguments") or ""
                         events.append({
                             "ts": ts, "kind": "tool_use",
                             "text": "", "tool": payload.get("name", "function"),
                             "role": "assistant",
-                            "extra": {"arguments": (payload.get("arguments") or "")[:2000]},
+                            "extra": {"arguments": args[:2000]},
+                            "search_text": _search_cap(args),
                         })
                     elif item_type == "function_call_output":
                         out = payload.get("output")
                         if isinstance(out, dict):
                             out = out.get("output") or out.get("content") or json.dumps(out)
+                        out = str(out or "")
                         events.append({
                             "ts": ts, "kind": "tool_result",
-                            "text": str(out or "")[:4000],
+                            "text": out[:4000],
                             "tool": None, "role": "user", "extra": {},
+                            "search_text": _search_cap(out),
                         })
                     elif item_type == "reasoning":
                         # Codex encrypts the reasoning trace; only the (often empty)
@@ -652,6 +667,7 @@ def codex_timeline(path: str | Path, limit: int = 60) -> list[dict]:
                                 "ts": ts, "kind": "reasoning",
                                 "text": text[:4000], "tool": None,
                                 "role": "assistant", "extra": {},
+                                "search_text": _search_cap(text),
                             })
                     elif item_type == "message":
                         role = payload.get("role", "")
@@ -667,6 +683,7 @@ def codex_timeline(path: str | Path, limit: int = 60) -> list[dict]:
                                     "ts": ts, "kind": "assistant_text",
                                     "text": text[:4000], "tool": None,
                                     "role": "assistant", "extra": {},
+                                    "search_text": _search_cap(text),
                                 })
                             elif ctype == "input_text" and role == "user":
                                 # the genuine user prompt — skip synthetic wrappers
@@ -675,7 +692,7 @@ def codex_timeline(path: str | Path, limit: int = 60) -> list[dict]:
                                 events.append({
                                     "ts": ts, "kind": "user_text",
                                     "text": text[:4000], "tool": None,
-                                    "role": "user", "extra": {},
+                                    "role": "user", "extra": {}, "search_text": _search_cap(text),
                                 })
     except Exception:
         pass
