@@ -19,7 +19,9 @@ import re
 import subprocess
 import sys
 
-HOME = os.path.expanduser("~")
+# Honour $HOME first (Windows' expanduser("~") ignores it, which breaks tests that
+# point HOME at a fixture tree). On the real remote (Linux) $HOME is always set.
+HOME = os.environ.get("HOME") or os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
 CODEX = os.path.join(HOME, ".codex")
 HISTORY_LIMIT = 150

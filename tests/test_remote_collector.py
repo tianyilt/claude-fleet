@@ -9,7 +9,16 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 COLLECTOR = Path(__file__).resolve().parents[1] / "scripts" / "remote-collector.py"
+
+# The collector only ever runs on the (Linux) remote via `python3 -`; its process
+# probes (`os.kill(pid, 0)`, `ps`, `lsof`) are Unix-only. History parsing is pure
+# file I/O and runs anywhere, but live-window detection can't be exercised on
+# Windows CI — signal 0 there means CTRL_C_EVENT, not "is this pid alive?".
+_unix_only = pytest.mark.skipif(os.name == "nt",
+                                reason="collector process-liveness probe is Unix-only")
 
 
 def _write(p: Path, obj) -> None:
@@ -61,6 +70,7 @@ def test_collector_codex_history(tmp_path):
     assert any(h["platform"] == "codex" and "deploy" in h["first_input"] for h in hist)
 
 
+@_unix_only
 def test_collector_live_claude_window(tmp_path):
     # a session registry file pointing at THIS process (guaranteed alive)
     reg = tmp_path / ".claude" / "sessions" / "live.json"
