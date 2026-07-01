@@ -242,3 +242,61 @@ def test_codex_plan_history_empty_when_no_plan(tmp_path):
     f = tmp_path / "rollout.jsonl"
     _write_jsonl(f, [{"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}}])
     assert codex.codex_plan_history(f) == []
+
+
+# ---------- Fix: readable codex titles (skip low-info openers + compress paths) ----------
+
+def test_codex_title_skips_greeting_opener(tmp_path):
+    f = tmp_path / "r.jsonl"
+    _write_jsonl(f, [
+        {"type": "session_meta", "payload": {"id": "x", "cwd": "/tmp"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "<environment_context>\n  <cwd>/tmp</cwd>"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "你好"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "你好！有什么可以帮你"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "这个机器上是不是跑着一个 autoevaluator manager"}]}},
+    ])
+    # skips synthetic + "你好" → the real intent
+    assert codex._extract_first_user_input(f) == "这个机器上是不是跑着一个 autoevaluator manager"
+
+
+def test_codex_title_skips_single_char_and_digits(tmp_path):
+    f = tmp_path / "r.jsonl"
+    _write_jsonl(f, [
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "1"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "查找 19091 端口的进程并给我重启命令"}]}},
+    ])
+    assert codex._extract_first_user_input(f) == "查找 19091 端口的进程并给我重启命令"
+
+
+def test_codex_title_compresses_long_path(tmp_path):
+    f = tmp_path / "r.jsonl"
+    long = "看下这个里面 /srv/data/project/alpha/beta/gamma/delta/20260611"
+    _write_jsonl(f, [
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": long}]}},
+    ])
+    title = codex._extract_first_user_input(f)
+    assert "看下这个里面" in title
+    assert "…/20260611" in title and "/srv/data/project/alpha" not in title
+
+
+def test_codex_title_falls_back_when_all_low_info(tmp_path):
+    """If the user only ever said '你好', don't drop the title to empty — keep it."""
+    f = tmp_path / "r.jsonl"
+    _write_jsonl(f, [
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "你好"}]}},
+    ])
+    assert codex._extract_first_user_input(f) == "你好"
+
+
+def test_codex_low_info_helper():
+    assert codex._low_info("1") and codex._low_info("a") and codex._low_info("你好")
+    assert codex._low_info("ok") and codex._low_info("  hi  ") and codex._low_info("123")
+    assert not codex._low_info("重启服务") and not codex._low_info("这个机器上是不是跑着")

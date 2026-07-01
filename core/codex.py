@@ -99,17 +99,44 @@ def _first_text(content) -> str:
     return ""
 
 
+# Openers that carry no intent — a codex session titled "1" / "你好" / "ok" tells
+# you nothing. When the first real message is one of these, we look past it to the
+# first message that actually says what the session is about.
+_GREETINGS = {
+    "你好", "您好", "hi", "hello", "hey", "ok", "okay", "好的", "在吗", "在",
+    "嗨", "test", "测试", "yo", "哈喽", "嗯", "ping", "hello?", "start", "开始",
+}
+
+
+def _low_info(text: str) -> bool:
+    """A first message that shouldn't win the title: single char, pure digits,
+    or a bare greeting/probe."""
+    core = re.sub(r"[\s\W_]+", "", text).lower()
+    return len(core) <= 1 or core.isdigit() or core in _GREETINGS
+
+
+def _compress_paths(text: str) -> str:
+    """Long absolute paths hog the title (`看下这个 /a/b/c/.../hash…`) and bury the
+    intent — collapse each to `…/<last segment>` so the words show."""
+    return re.sub(r"/[^\s'\"]{18,}",
+                  lambda m: "…/" + m.group(0).rstrip("/").rsplit("/", 1)[-1],
+                  text)
+
+
 def _extract_first_user_input(path: Path) -> str:
-    """Return the user's real first prompt.
+    """Return a READABLE title for the session.
 
     The genuine prompt is a `response_item`/`message` with role=="user" carrying
     `input_text`, but Codex precedes it with synthetic user/developer records
-    (permissions + environment_context). The old code grabbed the first
-    `output_text` instead, which is the *assistant's* opening reply — so every
-    Codex session was mistitled with "我会先…" / "I'll…". Skip the wrappers and
-    take the first real user message; only fall back to assistant text if none.
+    (permissions + environment_context), and users often open with a throwaway
+    "1" / "你好" before saying what they want. So: skip the synthetic wrappers,
+    then take the first message with actual intent (looking a few past low-info
+    openers), compress long paths, and only fall back to assistant text if the
+    session has no user message at all.
     """
     assistant_fallback = ""
+    first_user = ""            # first real user msg, even if low-info (fallback)
+    seen = 0
     try:
         with path.open() as f:
             for line in f:
@@ -129,12 +156,19 @@ def _extract_first_user_input(path: Path) -> str:
                 if role == "user":
                     if any(text.startswith(p) for p in _SYNTHETIC_PREFIXES):
                         continue
-                    return text[:300]
-                if role == "assistant" and not assistant_fallback:
-                    assistant_fallback = text[:300]
+                    if not first_user:
+                        first_user = text
+                    if not _low_info(text):
+                        return _compress_paths(text.strip())[:200]
+                    seen += 1
+                    if seen >= 8:          # stop hunting; use the opener we have
+                        break
+                elif role == "assistant" and not assistant_fallback:
+                    assistant_fallback = text
     except Exception:
         pass
-    return assistant_fallback
+    chosen = first_user or assistant_fallback
+    return _compress_paths(chosen.strip())[:200] if chosen else ""
 
 
 def extract_codex_session_activity(path: Path | str) -> dict:

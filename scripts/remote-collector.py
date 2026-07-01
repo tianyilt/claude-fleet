@@ -151,7 +151,38 @@ def _codex_meta(path):
     return None
 
 
+# Mirror of core/codex.py title logic so remote codex cards read as well as local.
+_GREETINGS = {
+    "你好", "您好", "hi", "hello", "hey", "ok", "okay", "好的", "在吗", "在",
+    "嗨", "test", "测试", "yo", "哈喽", "嗯", "ping", "hello?", "start", "开始",
+}
+
+
+def _low_info(text):
+    core = re.sub(r"[\s\W_]+", "", text).lower()
+    return len(core) <= 1 or core.isdigit() or core in _GREETINGS
+
+
+def _compress_paths(text):
+    return re.sub(r"/[^\s'\"]{18,}",
+                  lambda m: "…/" + m.group(0).rstrip("/").rsplit("/", 1)[-1],
+                  text)
+
+
+def _codex_msg_text(p):
+    for c in (p.get("content") or []):
+        if isinstance(c, dict) and c.get("type") in ("input_text", "text", "output_text"):
+            t = (c.get("text") or "").strip()
+            if t:
+                return t
+    return ""
+
+
 def _codex_first_user(path):
+    """First user message with actual intent: skip synthetic wrappers, look past
+    low-info openers ('1'/'你好'), compress long paths. Matches core/codex.py."""
+    first_user = ""
+    seen = 0
     try:
         with open(path) as f:
             for line in f:
@@ -164,14 +195,19 @@ def _codex_first_user(path):
                 p = d.get("payload") or {}
                 if p.get("type") != "message" or p.get("role") != "user":
                     continue
-                for c in (p.get("content") or []):
-                    if isinstance(c, dict) and c.get("type") == "input_text":
-                        t = (c.get("text") or "").strip()
-                        if t and not any(t.startswith(s) for s in _SYNTHETIC):
-                            return t[:300]
+                t = _codex_msg_text(p)
+                if not t or any(t.startswith(s) for s in _SYNTHETIC):
+                    continue
+                if not first_user:
+                    first_user = t
+                if not _low_info(t):
+                    return _compress_paths(t)[:200]
+                seen += 1
+                if seen >= 8:
+                    break
     except Exception:
         pass
-    return ""
+    return _compress_paths(first_user)[:200] if first_user else ""
 
 
 def _running_codex_pids():
