@@ -19,6 +19,31 @@ def test_parse_zh_timestamp_bad():
     assert perms._parse_zh_ts("not a date") is None
 
 
+def test_parse_zh_ts_single_digit_day():
+    """`date` space-pads single-digit days: "7月 1日" (a space after 月). This used
+    to fail to parse → epoch fell back to now → every pending session looked
+    permanently blocked on the 1st–9th of any month."""
+    import datetime
+    ep = perms._parse_zh_ts("2026年 7月 1日 星期三 20时57分30秒 CST")
+    assert ep is not None
+    d = datetime.datetime.fromtimestamp(ep)
+    assert (d.month, d.day, d.hour, d.minute, d.second) == (7, 1, 20, 57, 30)
+
+
+def test_parse_zh_ts_does_not_fallback_for_single_digit(tmp_path, monkeypatch):
+    # a real single-digit-day line must keep its parsed time, not silently become
+    # the file mtime (which would make it look "just now" and block forever).
+    import datetime
+    log = tmp_path / "focus.log"
+    _write_log(log, [
+        "2026年 7月 3日 星期五 09时08分07秒 CST notify: project=p tty=/dev/ttysZ msg=Bash 需要授权",
+    ])
+    monkeypatch.setattr(perms, "FOCUS_LOG", log)
+    ev = perms.recent_events()[-1]
+    d = datetime.datetime.fromtimestamp(ev.epoch)
+    assert (d.month, d.day, d.hour) == (7, 3, 9)   # parsed, not fallback mtime
+
+
 def test_classify_kind():
     assert perms._classify_kind("Bash 需要授权") == "approval"
     assert perms._classify_kind("Claude Code needs your approval for the plan") == "approval"
@@ -118,3 +143,20 @@ def test_snapshot_self_clears_when_session_advanced(monkeypatch):
     snap = app._build_enriched_snapshot()
     win = snap["windows"][0]
     assert win["triage"] != "waiting_perm" and win["permission_msg"] is None
+
+
+def test_snapshot_crunching_not_blocked_via_transcript_mtime(tmp_path, monkeypatch):
+    # The real-world false positive: session.json's updatedAt lags badly while
+    # Claude crunches, but the TRANSCRIPT keeps being written. Activity must be
+    # measured by transcript mtime, else a busy session looks stuck at an old prompt.
+    now = time.time()
+    tp = tmp_path / "t.jsonl"
+    tp.write_text('{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n')
+    # approval 60s ago; updatedAt 5 min stale; transcript mtime ≈ now (still writing)
+    ev = perms.PermEvent("p", "/dev/ttysA", "Bash 需要授权", "", now - 60, "approval")
+    w = _W(pid=1, tty="/dev/ttysA", updated_at=int((now - 300) * 1000), status="busy")
+    w.transcript_path = str(tp)
+    _patch_snapshot(monkeypatch, [w], {"/dev/ttysA": ev})
+    snap = app._build_enriched_snapshot()
+    win = snap["windows"][0]
+    assert win["permission_msg"] is None   # transcript advanced past approval → not blocked

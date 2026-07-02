@@ -31,7 +31,12 @@ _LINE_RE = re.compile(
     r"notify:\s+project=(?P<project>\S+)\s+tty=(?P<tty>\S*)\s+msg=(?P<msg>.+?)\s*$"
 )
 # zh-locale timestamp prefix: 2026年 6月24日 星期三 14时22分53秒 CST
-_TS_RE = re.compile(r"(\d{4})年\s*(\d{1,2})月(\d{1,2})日.*?(\d{1,2})时(\d{1,2})分(\d{1,2})秒")
+# NOTE: `date` space-pads single-digit days (%e) → "7月 1日" has a space after 月.
+# The `\s*` after each unit is essential; without it single-digit-day timestamps
+# (the 1st–9th of any month) fail to parse, fall back to "now", and make every
+# pending session look permanently blocked. Regression: test_parse_zh_ts_single_digit.
+_TS_RE = re.compile(
+    r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日.*?(\d{1,2})时\s*(\d{1,2})分\s*(\d{1,2})秒")
 
 # msg substrings that mean "blocked, needs the user to approve" (red alert).
 _APPROVAL_HINTS = ("需要授权", "needs your approval", "needs your permission",

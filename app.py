@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -68,10 +69,23 @@ def _build_enriched_snapshot() -> dict:
         w["platform"] = "claude"
         tty = w.get("tty")
         ev = perm_by_tty.get(tty) if tty else None
-        # A session is actually BLOCKED only if the approval prompt is at/after its
-        # last activity — once the user approves, the transcript advances and
-        # updated_at jumps past the event, self-clearing the alert.
-        blocked = bool(ev and ev.epoch >= (w.get("updated_at", 0) / 1000) - 5)
+        # BLOCKED only if the session is genuinely parked at the prompt: no activity
+        # AFTER the approval event. Measure activity by the TRANSCRIPT's mtime, not
+        # session.json's `updatedAt` — while Claude is crunching, it keeps appending
+        # to the transcript but `updatedAt` lags (often by many minutes), which made
+        # a busy session look permanently stuck at an old permission prompt.
+        blocked = False
+        if ev:
+            activity = (w.get("updated_at", 0) or 0) / 1000
+            _tp = w.get("transcript_path")
+            if _tp:
+                try:
+                    activity = max(activity, os.path.getmtime(_tp))
+                except OSError:
+                    pass
+            # Approve → transcript advances past the prompt (activity > ev.epoch);
+            # a real stall leaves activity at/before the prompt time.
+            blocked = ev.epoch >= activity - 5
         if blocked:
             w["permission_msg"] = ev.msg
             w["permission_ts"] = ev.raw_ts
