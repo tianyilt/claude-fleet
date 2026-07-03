@@ -40,8 +40,13 @@ def _run(home: Path) -> dict:
 
 def test_collector_empty_home(tmp_path):
     out = _run(tmp_path)
-    assert out["windows"] == [] and out["history"] == []
+    # history is fixture-controlled → must be empty. Live windows come from a
+    # system-wide `ps`/`lsof` scan that HOME can't sandbox, so a real codex/claude
+    # running on the dev box may show up; only assert none reference our fixture home.
+    assert out["history"] == []
     assert "home" in out
+    assert all(str(tmp_path) not in (w.get("transcript_path") or "")
+               for w in out["windows"])
 
 
 def test_collector_claude_history(tmp_path):
@@ -96,3 +101,35 @@ def test_collector_history_capped(tmp_path):
         os.utime(f, (now - i, now - i))   # stagger mtimes
     out = _run(tmp_path)
     assert 0 < len(out["history"]) <= 150
+
+
+def test_collector_codex_history_has_metrics(tmp_path):
+    # codex rollout with a token_count event + a message + a function_call → the
+    # history row must carry token/turn/tool metrics (was empty {} before).
+    sess = tmp_path / ".codex" / "sessions" / "2026" / "07" / "03"
+    lines = [
+        {"type": "session_meta", "payload": {"id": "cx1", "cwd": "/w",
+                                             "timestamp": "2026-07-03T10:00:00.000Z"}},
+        {"type": "turn_context", "payload": {"model": "gpt-5.5"}},
+        {"timestamp": "2026-07-03T10:00:01.000Z", "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "do it"}]}},
+        {"timestamp": "2026-07-03T10:00:05.000Z", "type": "response_item",
+         "payload": {"type": "function_call", "name": "exec_command", "arguments": "{}"}},
+        {"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": 10000, "output_tokens": 2000,
+                                  "cached_input_tokens": 300, "total_tokens": 12345},
+            "model_context_window": 272000}}},
+        {"timestamp": "2026-07-03T10:00:30.000Z", "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "done"}]}},
+    ]
+    _write(sess / "rollout-2026-07-03T10-00-00-cx1.jsonl",
+           "\n".join(json.dumps(x) for x in lines) + "\n")
+    out = _run(tmp_path)
+    h = [x for x in out["history"] if x["platform"] == "codex"][0]
+    m = h["metrics"]
+    assert m["tokens"]["total"] == 12345
+    assert m["turns"] == 2 and m["tools"].get("exec_command") == 1
+    assert m["duration_sec"] == 29 and m["model"] == "gpt-5.5"   # 10:00:01→10:00:30
+    assert m["cost_usd"] is None            # codex = subscription

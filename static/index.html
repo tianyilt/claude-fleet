@@ -439,7 +439,7 @@
         <div class="p-4 pb-2">
           <div class="flex items-center gap-2 mb-1">
             <span class="inline-block w-3 h-3 rounded-full shrink-0" :class="'triage-' + w.triage"></span>
-            <span class="font-semibold text-sm truncate" x-text="w.name || w.first_input || w.project_name"></span>
+            <span class="font-semibold text-sm truncate" x-text="cardName(w)"></span>
             <span x-show="w.platform === 'codex'"
                   class="text-[10px] px-1.5 rounded text-white shrink-0 bg-green-500">codex</span>
             <span x-show="w.source && w.source !== 'local'"
@@ -1050,6 +1050,17 @@ function fleet() {
       if (seconds < 60) return seconds + 's ago';
       if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
       return Math.floor(seconds / 3600) + 'h ago';
+    },
+    // Claude Code names a session asynchronously: for the first few seconds it uses
+    // a throwaway "<cwd-basename>-<hex>" (e.g. "tianyiliang-f9") before an LLM picks
+    // a meaningful one. That placeholder tells you nothing — prefer the real first
+    // input until a proper name lands.
+    cardName(w) {
+      const n = (w.name || '').trim();
+      const proj = w.project_name || '';
+      const esc = proj.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const isFallback = n && proj && new RegExp('^' + esc + '-[0-9a-f]{1,6}$', 'i').test(n);
+      return (!n || isFallback) ? (w.first_input || w.project_name || n) : n;
     },
 
     fmtTokens(n) {

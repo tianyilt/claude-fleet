@@ -142,6 +142,19 @@ def test_cached_windows_not_stale_when_ok(remotes_file):
     assert w["stale"] is False and w["triage"] in ("working", "idle")
 
 
+def test_cached_history_passes_metrics_through(remotes_file):
+    # remote codex history used to ship metrics={} (no tokens on the board).
+    remote.CACHE["srv1"] = {"ok": True, "windows": [], "history": [{
+        "session_id": "h1", "platform": "codex", "first_input": "x",
+        "metrics": {"tokens": {"total": 999}, "cost_usd": None, "model": "gpt-5.5",
+                    "turns": 3, "duration_sec": 42}}]}
+    row = remote.cached_history()[0]
+    assert row["metrics"]["tokens"]["total"] == 999
+    assert row["metrics"]["turns"] == 3 and row["metrics"]["duration_sec"] == 42
+    assert row["metrics"]["cost_usd"] is None    # codex = subscription, stays None
+    assert row["model"] == "gpt-5.5"             # model surfaced from metrics
+
+
 def test_cached_history_source_tagged(remotes_file):
     remote.CACHE["srv1"] = {"ok": True, "windows": [], "history": [
         {"session_id": "h1", "platform": "codex", "first_input": "x",

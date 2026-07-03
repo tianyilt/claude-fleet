@@ -257,6 +257,132 @@ def _codex_windows():
     return out
 
 
+# ---------- per-session metrics (mirror of core/metrics.py + codex.py) ----------
+
+def _iso_dur(first, last):
+    import datetime
+    def _p(ts):
+        try:
+            return datetime.datetime.fromisoformat((ts or "").replace("Z", "+00:00"))
+        except Exception:
+            return None
+    a, b = _p(first), _p(last)
+    return max(0, int((b - a).total_seconds())) if a and b else None
+
+
+def _empty_tokens():
+    return {"input": 0, "output": 0, "cache_read": 0,
+            "cache_creation": 0, "reasoning": 0, "total": 0}
+
+
+def _cache_hit(tk):
+    seen = tk["input"] + tk["cache_creation"] + tk["cache_read"]
+    return round(tk["cache_read"] / seen, 3) if seen else None
+
+
+def _codex_metrics(path):
+    """Mirror core/codex.py extract_codex_session_activity's metrics block."""
+    tk = _empty_tokens()
+    tools = {}
+    turns = 0
+    first_ts = last_ts = ""
+    ctx_window = 0
+    ctx_pct = None
+    model = ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                t = d.get("type", "")
+                p = d.get("payload") or {}
+                ts = d.get("timestamp", "")
+                if ts:
+                    if not first_ts:
+                        first_ts = ts
+                    last_ts = ts
+                if t == "event_msg" and p.get("type") == "token_count":
+                    info = p.get("info") or {}
+                    tot = info.get("total_token_usage") or {}
+                    if tot:
+                        tk["input"] = tot.get("input_tokens", 0) or 0
+                        tk["cache_read"] = tot.get("cached_input_tokens", 0) or 0
+                        tk["output"] = tot.get("output_tokens", 0) or 0
+                        tk["reasoning"] = tot.get("reasoning_output_tokens", 0) or 0
+                        tk["total"] = tot.get("total_tokens", 0) or 0
+                    ctx_window = info.get("model_context_window", 0) or ctx_window
+                    prim = (p.get("rate_limits") or {}).get("primary") or {}
+                    if prim.get("used_percent") is not None:
+                        ctx_pct = prim["used_percent"]
+                if t == "turn_context" and p.get("model"):
+                    model = p.get("model", "")
+                if t != "response_item":
+                    continue
+                if p.get("type") == "message" and p.get("role") in ("user", "assistant"):
+                    turns += 1
+                if p.get("type") == "function_call":
+                    n = p.get("name", "")
+                    tools[n] = tools.get(n, 0) + 1
+    except Exception:
+        pass
+    return {"tokens": tk, "cache_hit": _cache_hit(tk), "context_pct": ctx_pct,
+            "context_window": ctx_window or None, "duration_sec": _iso_dur(first_ts, last_ts),
+            "turns": turns, "tools": tools, "files": [], "errors": 0,
+            "cost_usd": None, "model": model}
+
+
+def _claude_metrics(path):
+    """Mirror core/metrics.py claude_metrics (cost_usd filled in locally, where the
+    pricing table lives — collector only reports raw tokens + model)."""
+    tk = _empty_tokens()
+    tools = {}
+    turns = errors = 0
+    first_ts = last_ts = ""
+    model = ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                ts = d.get("timestamp", "")
+                if ts:
+                    if not first_ts:
+                        first_ts = ts
+                    last_ts = ts
+                typ = d.get("type")
+                if typ in ("user", "assistant"):
+                    turns += 1
+                msg = d.get("message") or {}
+                if typ == "assistant":
+                    if msg.get("model"):
+                        model = msg["model"]
+                    u = msg.get("usage") or {}
+                    tk["input"] += u.get("input_tokens", 0) or 0
+                    tk["output"] += u.get("output_tokens", 0) or 0
+                    tk["cache_read"] += u.get("cache_read_input_tokens", 0) or 0
+                    tk["cache_creation"] += u.get("cache_creation_input_tokens", 0) or 0
+                    if msg.get("stop_reason") == "max_tokens":
+                        errors += 1
+                    for b in (msg.get("content") or []):
+                        if isinstance(b, dict) and b.get("type") == "tool_use":
+                            tools[b.get("name", "?")] = tools.get(b.get("name", "?"), 0) + 1
+                elif typ == "user":
+                    for b in (msg.get("content") or []):
+                        if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error"):
+                            errors += 1
+    except Exception:
+        pass
+    tk["total"] = tk["input"] + tk["output"] + tk["cache_read"] + tk["cache_creation"]
+    return {"tokens": tk, "cache_hit": _cache_hit(tk), "context_pct": None,
+            "context_window": None, "duration_sec": _iso_dur(first_ts, last_ts),
+            "turns": turns, "tools": tools, "files": [], "errors": errors,
+            "cost_usd": None, "model": model}   # cost_usd computed locally in remote.py
+
+
 # ---------- history (recent N transcripts) ----------
 
 def _recent(paths, n):
@@ -282,6 +408,7 @@ def _history():
             "transcript_path": p,
             "transcript_mtime": int(os.path.getmtime(p) * 1000),
             "project": "", "project_name": os.path.basename(os.path.dirname(p)),
+            "metrics": _claude_metrics(p),
         })
     for p in _recent(codex_tx, HISTORY_LIMIT):
         meta = _codex_meta(p) or {}
@@ -293,6 +420,7 @@ def _history():
             "transcript_mtime": int(os.path.getmtime(p) * 1000),
             "first_ts": meta.get("timestamp", ""),
             "project": cwd, "project_name": cwd.rsplit("/", 1)[-1] if cwd else "",
+            "metrics": _codex_metrics(p),
         })
     return rows
 

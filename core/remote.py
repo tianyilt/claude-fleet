@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from . import metrics as _mx
 from .sessions import CLAUDE_HOME
 
 REMOTES_PATH = CLAUDE_HOME / "fleet-remotes.json"
@@ -230,6 +231,19 @@ def cached_history() -> list[dict]:
     for name, e in items:
         for h in e.get("history", []):
             ts = h.get("first_ts", "")
+            metrics = h.get("metrics") or {}
+            # Codex is a subscription (cost stays None); claude cost is priced here,
+            # locally, where the PRICING table lives — the collector only ships raw
+            # tokens + model to keep the remote script pricing-free.
+            if metrics and metrics.get("cost_usd") is None and h.get("platform") == "claude":
+                tk = metrics.get("tokens") or {}
+                try:
+                    metrics["cost_usd"] = _mx.request_cost(
+                        tk.get("input", 0), tk.get("output", 0),
+                        tk.get("cache_read", 0), tk.get("cache_creation", 0),
+                        metrics.get("model", "")) or None
+                except Exception:
+                    pass
             out.append({
                 "session_id": h.get("session_id", ""),
                 "project": h.get("project", ""),
@@ -242,10 +256,10 @@ def cached_history() -> list[dict]:
                 "transcript_mtime": h.get("transcript_mtime", 0),
                 "is_alive": False,
                 "platform": h.get("platform", "codex"),
-                "model": h.get("model", ""),
+                "model": h.get("model", "") or metrics.get("model", ""),
                 "skills_used": [], "memory_ops": [],
                 "skill_breakdown": {}, "memory_breakdown": {},
-                "metrics": {}, "plan_title": "",
+                "metrics": metrics, "plan_title": "",
                 "source": name,
             })
     return out
