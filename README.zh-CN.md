@@ -147,6 +147,28 @@ Fork/Resume 在 macOS 和 Linux 上都能开真实终端(Claude 和 Codex 会话
 > 切过去)。想换别的终端/窗口管理器,放一个可执行的 `~/.claude/focus-tty.sh`(接收 `<tty>` 参数)
 > 即可,优先于自带默认。*(自带 shim 由 [@wanshuiyin](https://github.com/wanshuiyin) 贡献。)*
 
+## CLI
+
+`pip install -e .` 会同时装一个 `claude-fleet` 命令（别名 `fleet`），专治"记得干过什么、
+想不起在哪个 session"——全文搜索所有历史 session（本地 + 注册的远端服务器），每条命中
+直接附上可粘贴执行的 resume/fork 命令。不要求 dashboard 在跑；但 dashboard 在跑时会复用
+它的远端缓存，省掉重复 SSH。
+
+```bash
+fleet search "flaky auth test"                  # 本地全文搜索
+fleet search "npu eval" --all-remotes --deep    # 加上 SSH 全文搜远端 transcript
+fleet show 019e1814 --tail 20                   # 摘要卡 + 最后 N 条事件（id 前缀即可）
+fleet resume 019e1814 --fork                    # 只打印 fork 命令（不执行）
+fleet resume 019e1814 --launch                  # 真正开一个终端窗口
+fleet remotes add gpu1 'ssh -p 2222 user@host'  # 与 dashboard 共用同一份注册表
+fleet remotes check                             # 现场 SSH 探测所有远端
+```
+
+说明：`--deep` 把 collector 的 search 模式管道推到远端执行（远端有 `rg` 用 rg，没有就
+纯 stdlib 扫描；`--days` 限定时间窗，默认 90 天）。打印的命令是 POSIX shell 风格。
+退出码：`0` 有结果 · `1` 无结果 · `2` 出错。`--json` 输出机器可读结果，每条带
+`resume_command` / `fork_command`。
+
 ## 架构
 
 单文件前端（Alpine.js + Tailwind CDN，不需要 npm），Python 后端只读 `~/.claude/` 和 `~/.codex/`，不改任何 agent 状态。
@@ -162,6 +184,7 @@ core/
   terminal.py         按平台分派的终端控制（macOS 默认终端；其它平台降级）
   actions.py          fork / review / close（在 terminal.py 外层做 session 查找）
   history.py          统一索引 + 全文 rg 搜索
+  cli.py              claude-fleet / fleet 命令（search · show · resume · remotes）
   skills.py           skill 目录扫描
   memory.py           memory 文件解析
   plans.py            plan 关联（从 transcript 提取）

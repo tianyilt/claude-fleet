@@ -11,13 +11,23 @@ core/codex.py detection here. Output (one JSON object on stdout):
 Each window/history row carries platform + session_id + cwd + first_input + the
 remote transcript_path (used later for `ssh cat` timelines and resume). Keep it
 cheap: live processes only + the most-recent HISTORY_LIMIT transcripts.
+
+Search mode (`python3 - search <query> [--days N] [--max-files N]`) greps the
+remote's transcripts full-text instead of collecting windows, and prints:
+
+    {"matches": [ {...} ], "path": "...", "home": "/root"}
+
+Each match row mirrors a history row plus `snippets` (±60 chars around the hit).
+Uses ripgrep when the remote has it, otherwise a pure-Python line scan.
 """
 import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 
 # Honour $HOME first (Windows' expanduser("~") ignores it, which breaks tests that
 # point HOME at a fixture tree). On the real remote (Linux) $HOME is always set.
@@ -107,6 +117,26 @@ def _claude_first_user(path):
                     for b in c:
                         if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip():
                             return b["text"].strip()[:300]
+    except Exception:
+        pass
+    return ""
+
+
+def _claude_cwd(path):
+    """The session's working directory — Claude Code stamps `cwd` on most rows.
+    Needed so a resume command can `cd` to the real project instead of $HOME."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= 20:
+                    break
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                cwd = d.get("cwd")
+                if cwd:
+                    return cwd
     except Exception:
         pass
     return ""
@@ -425,7 +455,144 @@ def _history():
     return rows
 
 
+# ---------- full-text search (search mode) ----------
+
+SEARCH_SNIPPET_RADIUS = 60
+SEARCH_MAX_SNIPPETS = 3
+
+
+def _search_candidates(days, max_files):
+    """Transcript paths to grep, newest first, bounded by mtime window + count."""
+    claude_tx = [p for p in glob.glob(os.path.join(CLAUDE, "projects", "*", "*.jsonl"))
+                 if not p.endswith(".wakatime") and "subagents" not in p]
+    codex_tx = glob.glob(os.path.join(CODEX, "sessions", "**", "*.jsonl"), recursive=True)
+    cutoff = time.time() - days * 86400
+    scored = []
+    for p in claude_tx + codex_tx:
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if mt >= cutoff:
+            scored.append((mt, p))
+    scored.sort(reverse=True)
+    return [p for _, p in scored[:max_files]]
+
+
+def _snippets_in_file(path, query):
+    """≤ SEARCH_MAX_SNIPPETS ±60-char windows around case-insensitive hits."""
+    ql = query.casefold()
+    snippets = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                idx = line.casefold().find(ql)
+                if idx < 0:
+                    continue
+                start = max(0, idx - SEARCH_SNIPPET_RADIUS)
+                end = min(len(line), idx + len(query) + SEARCH_SNIPPET_RADIUS)
+                snippet = line[start:end].replace("\n", " ").replace("\\n", " ").strip()
+                if start > 0:
+                    snippet = "…" + snippet
+                if end < len(line):
+                    snippet = snippet + "…"
+                snippets.append(snippet)
+                if len(snippets) >= SEARCH_MAX_SNIPPETS:
+                    break
+    except Exception:
+        pass
+    return snippets
+
+
+def _rg_matching_files(query, candidates):
+    """ripgrep as a fast pre-filter (files-with-matches only; snippets are then
+    extracted in Python so one multi-MB jsonl line can't flood stdout). Returns
+    None when rg is unavailable/failed → caller falls back to the pure scan."""
+    if not shutil.which("rg"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["rg", "-il", "--fixed-strings", "--no-messages", query] + candidates,
+            capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    # rg exits 1 on "no matches" — only treat >1 (real errors) as failure.
+    if proc.returncode > 1:
+        return None
+    return [p for p in proc.stdout.splitlines() if p]
+
+
+def _match_row(path, query):
+    snippets = _snippets_in_file(path, query)
+    if not snippets:
+        return None
+    try:
+        mtime = int(os.path.getmtime(path) * 1000)
+    except OSError:
+        mtime = 0
+    if os.sep + ".codex" + os.sep in path or "/.codex/" in path:
+        meta = _codex_meta(path) or {}
+        cwd = meta.get("cwd", "")
+        return {
+            "platform": "codex",
+            "session_id": meta.get("id", os.path.splitext(os.path.basename(path))[0]),
+            "first_input": _codex_first_user(path),
+            "transcript_path": path, "transcript_mtime": mtime,
+            "first_ts": meta.get("timestamp", ""),
+            "project": cwd, "project_name": cwd.rsplit("/", 1)[-1] if cwd else "",
+            "snippets": snippets,
+        }
+    cwd = _claude_cwd(path)
+    return {
+        "platform": "claude",
+        "session_id": os.path.splitext(os.path.basename(path))[0],
+        "first_input": _claude_first_user(path),
+        "transcript_path": path, "transcript_mtime": mtime,
+        "first_ts": "",
+        "project": cwd,
+        "project_name": (cwd.rsplit("/", 1)[-1] if cwd
+                         else os.path.basename(os.path.dirname(path))),
+        "snippets": snippets,
+    }
+
+
+def _search(query, days=90, max_files=400):
+    candidates = _search_candidates(days, max_files)
+    files = _rg_matching_files(query, candidates)
+    if files is None:
+        files = candidates            # no rg → pure-Python scan of every candidate
+    matches = []
+    for p in files:
+        row = _match_row(p, query)
+        if row:
+            matches.append(row)
+    matches.sort(key=lambda r: r["transcript_mtime"], reverse=True)
+    return {"home": HOME, "matches": matches, "path": _fallback_path()}
+
+
+def _search_main(argv):
+    query = argv[0] if argv else ""
+    days, max_files = 90, 400
+    i = 1
+    while i < len(argv) - 1:
+        if argv[i] == "--days":
+            days = int(argv[i + 1]); i += 2
+        elif argv[i] == "--max-files":
+            max_files = int(argv[i + 1]); i += 2
+        else:
+            i += 1
+    try:
+        result = _search(query, days=days, max_files=max_files) if query else \
+            {"error": "empty query", "matches": [], "path": ""}
+    except Exception as e:
+        result = {"error": str(e), "matches": [], "path": ""}
+    sys.stdout.write(json.dumps(result))
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "search":
+        _search_main(sys.argv[2:])
+        return
     try:
         windows = _claude_windows() + _codex_windows()
         # Host-level resume PATH: reuse a live session's env (it already has codex/

@@ -366,7 +366,8 @@ def _rg_search_sessions(query: str) -> dict[str, list[str]]:
         query,
     ] + search_dirs
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
+                              encoding="utf-8", errors="replace")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return {}
     result: dict[str, list[str]] = {}
@@ -379,6 +380,12 @@ def _rg_search_sessions(query: str) -> dict[str, list[str]]:
         fpath = raw_line[:colon + 6]
         content = raw_line[colon + 7:]
         sid = Path(fpath).stem
+        # Codex rollouts are named rollout-<timestamp>-<session-id>.jsonl but the
+        # index keys codex sessions by the meta id — strip the wrapper so codex
+        # full-text hits actually intersect the index instead of being dropped.
+        m = _re.match(r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)$", sid)
+        if m:
+            sid = m.group(1)
         # Extract a human-readable snippet around the match
         idx = content.lower().find(ql)
         if idx < 0:

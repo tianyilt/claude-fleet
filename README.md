@@ -172,6 +172,30 @@ clipboard instead. Focus is macOS-only.
 > executable `~/.claude/focus-tty.sh` taking a `<tty>` arg; it takes precedence over
 > the bundled default. *(Bundled shim contributed by [@wanshuiyin](https://github.com/wanshuiyin).)*
 
+## CLI
+
+`pip install -e .` also installs a `claude-fleet` command (alias: `fleet`) for the
+"I remember *what* I worked on but not *where*" moment — full-text search every
+past session, local **and** on registered remotes, and get a paste-ready
+resume/fork command per hit. It does not need the dashboard to be running, but
+reuses a running dashboard's remote cache to skip redundant SSH.
+
+```bash
+fleet search "flaky auth test"                  # local full-text search
+fleet search "npu eval" --all-remotes --deep    # + SSH full-text grep of remotes
+fleet show 019e1814 --tail 20                   # summary card + last events (id prefix ok)
+fleet resume 019e1814 --fork                    # print the fork command (nothing executed)
+fleet resume 019e1814 --launch                  # actually open a terminal window
+fleet remotes add gpu1 'ssh -p 2222 user@host'  # same registry as the dashboard
+fleet remotes check                             # SSH-probe every registered remote
+```
+
+Notes: `--deep` pipes the collector's search mode to the remote (`rg` when the
+remote has it, stdlib scan otherwise; `--days` bounds the window, default 90).
+Printed commands are POSIX-shell style. Exit codes: `0` hits · `1` no results ·
+`2` error. `--json` gives machine-readable output with `resume_command` /
+`fork_command` per session.
+
 ## Architecture
 
 Single-file frontend (Alpine.js + Tailwind via CDN — no npm). The Python backend
@@ -188,6 +212,7 @@ core/
   terminal.py         per-platform terminal control (macOS default terminal; degrades elsewhere)
   actions.py          fork / review / close (session lookup around terminal.py)
   history.py          unified index + full-text rg search
+  cli.py              claude-fleet / fleet command (search · show · resume · remotes)
   skills.py           skill directory scan
   memory.py           memory file parsing
   plans.py            plan association (extracted from transcripts)

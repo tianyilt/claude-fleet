@@ -13,6 +13,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
 
+[project.scripts]
+claude-fleet = "core.cli:main"
+fleet = "core.cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

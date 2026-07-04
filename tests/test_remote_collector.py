@@ -26,13 +26,15 @@ def _write(p: Path, obj) -> None:
     p.write_text(obj if isinstance(obj, str) else json.dumps(obj))
 
 
-def _run(home: Path) -> dict:
+def _run(home: Path, *argv: str, env_extra: dict | None = None) -> dict:
     env = dict(os.environ, HOME=str(home))
+    if env_extra:
+        env.update(env_extra)
     # utf-8 explicitly: the collector source is UTF-8 (non-ASCII title helpers),
     # so reading it and piping it to the child must not use the platform default
     # codec (cp1252 on Windows → UnicodeDecodeError).
     src = COLLECTOR.read_text(encoding="utf-8")
-    proc = subprocess.run([sys.executable, "-"], input=src, env=env,
+    proc = subprocess.run([sys.executable, "-", *argv], input=src, env=env,
                           capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
@@ -101,6 +103,78 @@ def test_collector_history_capped(tmp_path):
         os.utime(f, (now - i, now - i))   # stagger mtimes
     out = _run(tmp_path)
     assert 0 < len(out["history"]) <= 150
+
+
+# ---------- search mode (`python3 - search <query>`) ----------
+
+def _seed_search_home(tmp_path):
+    proj = tmp_path / ".claude" / "projects" / "-work-exp"
+    # ensure_ascii=False: real Claude Code transcripts store CJK raw, and the
+    # snippet extractor works on raw lines — escaped \uXXXX would never match.
+    _write(proj / "cl-1.jsonl", "\n".join([
+        json.dumps({"type": "user", "cwd": "/work/exp",
+                    "message": {"role": "user", "content": "跑 caption v2 对照实验"}},
+                   ensure_ascii=False),
+        json.dumps({"type": "assistant",
+                    "message": {"role": "assistant",
+                                "content": [{"type": "text", "text": "caption_compare dashboard built"}]}}),
+    ]) + "\n")
+    sess = tmp_path / ".codex" / "sessions" / "2026" / "05" / "12"
+    _write(sess / "rollout-2026-05-12T01-00-00-cx-7.jsonl", "\n".join([
+        json.dumps({"type": "session_meta", "payload": {"id": "cx-7", "cwd": "/tmp/audit"}}),
+        json.dumps({"type": "response_item",
+                    "payload": {"type": "message", "role": "user",
+                                "content": [{"type": "input_text",
+                                             "text": "audit the caption_compare bitable"}]}}),
+    ]) + "\n")
+
+
+def test_collector_search_hits_both_platforms(tmp_path):
+    _seed_search_home(tmp_path)
+    out = _run(tmp_path, "search", "caption_compare")
+    matches = out["matches"]
+    assert {m["platform"] for m in matches} == {"claude", "codex"}
+    cl = next(m for m in matches if m["platform"] == "claude")
+    assert cl["session_id"] == "cl-1"
+    assert cl["project"] == "/work/exp"          # cwd recovered for resume
+    assert any("caption_compare" in s for s in cl["snippets"])
+    cx = next(m for m in matches if m["platform"] == "codex")
+    assert cx["session_id"] == "cx-7"            # meta id, not the rollout stem
+    assert cx["project"] == "/tmp/audit"
+    assert out["path"]                           # resume env PATH rides along
+
+
+def test_collector_search_case_insensitive_unicode(tmp_path):
+    _seed_search_home(tmp_path)
+    out = _run(tmp_path, "search", "CAPTION V2")
+    assert any("对照实验" in s for m in out["matches"] for s in m["snippets"])
+
+
+def test_collector_search_no_match(tmp_path):
+    _seed_search_home(tmp_path)
+    out = _run(tmp_path, "search", "zzz-not-there")
+    assert out["matches"] == []
+
+
+def test_collector_search_days_window(tmp_path):
+    _seed_search_home(tmp_path)
+    old = time.time() - 40 * 86400
+    for f in (tmp_path / ".claude").rglob("*.jsonl"):
+        os.utime(f, (old, old))
+    for f in (tmp_path / ".codex").rglob("*.jsonl"):
+        os.utime(f, (old, old))
+    out = _run(tmp_path, "search", "caption_compare", "--days", "7")
+    assert out["matches"] == []
+    out = _run(tmp_path, "search", "caption_compare", "--days", "90")
+    assert len(out["matches"]) == 2
+
+
+def test_collector_search_pure_python_fallback(tmp_path):
+    # Empty PATH → shutil.which('rg') fails → the stdlib line scan must produce
+    # the same hits (this is the path a bare remote box without ripgrep takes).
+    _seed_search_home(tmp_path)
+    out = _run(tmp_path, "search", "caption_compare", env_extra={"PATH": ""})
+    assert {m["platform"] for m in out["matches"]} == {"claude", "codex"}
 
 
 def test_collector_codex_history_has_metrics(tmp_path):

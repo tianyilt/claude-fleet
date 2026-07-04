@@ -26,6 +26,7 @@ REMOTES_PATH = CLAUDE_HOME / "fleet-remotes.json"
 _COLLECTOR = (Path(__file__).resolve().parents[1] / "scripts" / "remote-collector.py")
 
 POLL_TIMEOUT = 20        # seconds per remote SSH collect
+SEARCH_TIMEOUT = 60      # full-text grep over transcripts is slower than collect
 _lock = threading.Lock()
 # name -> {ts, ok, error, home, windows: [...], history: [...]}
 CACHE: dict[str, dict] = {}
@@ -94,6 +95,22 @@ def collect(remote: dict) -> dict:
     ]
     proc = subprocess.run(args, input=src, capture_output=True, text=True,
                           encoding="utf-8", timeout=POLL_TIMEOUT)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "ssh failed").strip()[:300])
+    return json.loads(proc.stdout)
+
+
+def search_remote(remote: dict, query: str, days: int = 90) -> dict:
+    """Full-text search the remote's transcripts (collector `search` mode).
+    Returns parsed {matches, path, home}. The query is shell-quoted because ssh
+    joins argv into one remote shell command string."""
+    src = _COLLECTOR.read_text(encoding="utf-8")
+    args = shlex.split(remote["ssh"]) + [
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+        "python3", "-", "search", shlex.quote(query), "--days", str(int(days)),
+    ]
+    proc = subprocess.run(args, input=src, capture_output=True, text=True,
+                          encoding="utf-8", timeout=SEARCH_TIMEOUT)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "ssh failed").strip()[:300])
     return json.loads(proc.stdout)
