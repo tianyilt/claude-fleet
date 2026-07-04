@@ -23,7 +23,8 @@ _unix_only = pytest.mark.skipif(os.name == "nt",
 
 def _write(p: Path, obj) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(obj if isinstance(obj, str) else json.dumps(obj))
+    # utf-8 explicitly — seeds carry CJK and Windows' default is cp1252.
+    p.write_text(obj if isinstance(obj, str) else json.dumps(obj), encoding="utf-8")
 
 
 def _run(home: Path, *argv: str, env_extra: dict | None = None) -> dict:
