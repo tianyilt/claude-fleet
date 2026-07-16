@@ -102,8 +102,13 @@ def _compute_last_assistant_info(lines: list[str]) -> Optional[dict]:
                     break
         break
 
-    # Keyword fallback: if the assistant's last text mentions waiting for background work
-    if not has_pending_background and last_text and _BG_KEYWORDS.search(last_text):
+    # Keyword fallback: only when the turn has NOT cleanly ended. A finished turn
+    # (stop_reason == end_turn) that merely *mentions* monitoring/background is done,
+    # not working — genuine post-turn background work is caught by the queue-operation
+    # signal above (which resets on end_turn). Without this guard, any session whose
+    # last message says "monitor / 后台 / 等待通知" is pinned to `working` forever.
+    if (not has_pending_background and last_text and stop_reason != "end_turn"
+            and _BG_KEYWORDS.search(last_text)):
         has_pending_background = True
 
     return {
@@ -172,7 +177,10 @@ def classify(window_dict: dict) -> dict:
     stop = info["stop_reason"]
     idle_str = _format_idle(idle)
 
-    if info.get("has_pending_background"):
+    # A background signal only means "working" while the session is recently active.
+    # Past the closeable threshold (1h idle) fall through to the normal end_turn/
+    # completed/closeable logic so a stale background hint never pins `working` forever.
+    if info.get("has_pending_background") and idle < CLOSEABLE_THRESHOLD:
         summary = info["last_text"].split("\n")[0][:80] if info["last_text"] else ""
         return {
             "triage": "working",
