@@ -1,4 +1,4 @@
-"""Side-effectful actions: fork, close, review.
+"""Side-effectful actions: fork, close, handoff, review.
 
 Terminal window control (open/focus) lives in core/terminal.py and is dispatched
 per-platform there; this module bundles the session lookup around it.
@@ -6,13 +6,15 @@ per-platform there; this module bundles the session lookup around it.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import shlex
 import subprocess
 import threading
+import time
 
 from . import terminal
-from .sessions import find_window
+from .sessions import find_window, _pid_alive
 from .transcripts import timeline
 
 
@@ -64,6 +66,56 @@ def close_session(pid: int) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
     return {"ok": True, "pid": pid, "message": f"SIGTERM sent to {pid}"}
+
+
+def _copy_clipboard(text: str) -> bool:
+    if not terminal.IS_MAC or not shutil.which("pbcopy"):
+        return False
+    try:
+        subprocess.run(["pbcopy"], input=text, text=True, timeout=3, check=True)
+        return True
+    except Exception:
+        return False
+
+
+def handoff_session(pid: int, force: bool = False, wait_seconds: float = 8.0,
+                    copy: bool = True) -> dict:
+    """Gracefully stop a live Claude session and hand out its resume command, so
+    another frontend (an Orca pane, a different terminal) can pick it up.
+
+    Claude flushes the transcript continuously, so exiting an idle session loses
+    nothing — but a mid-generation kill drops the in-flight turn, hence the busy
+    gate. Refuses to hand off while the old process is still alive: two processes
+    resuming one session id fork the transcript.
+    """
+    w = find_window(pid)
+    if not w:
+        return {"ok": False, "error": f"no window pid={pid}"}
+    resume_command = terminal.session_cli_command("claude", w.session_id, w.cwd)
+
+    if w.alive:
+        if w.status == "busy" and not force:
+            return {"ok": False,
+                    "error": f"session {w.session_id[:8]} is busy (mid-generation); "
+                             f"retry when idle, or pass --force to kill anyway"}
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return {"ok": False, "error": "permission denied"}
+        deadline = time.monotonic() + wait_seconds
+        while _pid_alive(pid):
+            if time.monotonic() >= deadline:
+                return {"ok": False, "pid": pid,
+                        "error": f"pid {pid} still running {wait_seconds:.0f}s after SIGTERM — "
+                                 f"not handing off (resuming now would fork the transcript)"}
+            time.sleep(0.2)
+
+    copied = _copy_clipboard(resume_command) if copy else False
+    return {"ok": True, "pid": pid, "session_id": w.session_id,
+            "name": w.name or w.project_name,
+            "resume_command": resume_command, "copied": copied}
 
 
 # ---------- background review (non-interactive `claude -p`) ----------

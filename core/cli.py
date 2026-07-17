@@ -403,6 +403,53 @@ def cmd_resume(args) -> int:
     return EXIT_ERROR
 
 
+# ---------- handoff (live session → another frontend, e.g. an Orca pane) ----------
+
+def cmd_handoff(args) -> int:
+    from . import actions, sessions
+    wins = sessions.list_windows(include_dead=False)
+    token = (args.session_id or "").strip()
+
+    if not token:
+        if not wins:
+            print("no live local sessions")
+            return EXIT_EMPTY
+        print(f"{len(wins)} live session(s) — handoff takes a session-id prefix or pid:\n")
+        for w in wins:
+            print(f"  {w.session_id[:12]}  pid={w.pid:<7} {w.status:<8} "
+                  f"{_one_line(w.name or w.project_name or '', 60)}")
+        return EXIT_OK
+
+    if token.isdigit():
+        matches = [w for w in wins if w.pid == int(token)]
+    else:
+        matches = [w for w in wins if w.session_id.startswith(token)]
+    if not matches:
+        print(f"error: no LIVE local session matching '{token}' "
+              f"(handoff only targets running local sessions; for history use "
+              f"`claude-fleet resume`, for remotes use `--source <name>` there)",
+              file=sys.stderr)
+        return EXIT_ERROR
+    if len(matches) > 1:
+        print(f"error: '{token}' is ambiguous ({len(matches)} live sessions):", file=sys.stderr)
+        for w in matches:
+            print(f"  {w.session_id}  pid={w.pid}  {w.status}", file=sys.stderr)
+        return EXIT_ERROR
+
+    w = matches[0]
+    result = actions.handoff_session(w.pid, force=args.force)
+    if not result.get("ok"):
+        print(f"error: {result.get('error', 'handoff failed')}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"handed off: {result['session_id']}  ({_one_line(result.get('name') or '', 60)})")
+    print(f"resume : {result['resume_command']}")
+    if result.get("copied"):
+        print("copied to clipboard — paste into an Orca pane, or hit resume in Orca's AI Vault")
+    else:
+        print("paste into an Orca pane, or hit resume in Orca's AI Vault")
+    return EXIT_OK
+
+
 # ---------- remotes ----------
 
 def cmd_remotes(args) -> int:
@@ -484,6 +531,16 @@ def _build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--fork", action="store_true", help="fork instead of resume")
     rp.add_argument("--launch", action="store_true", help="open a terminal window now")
     rp.set_defaults(func=cmd_resume)
+
+    hp = sub.add_parser(
+        "handoff",
+        help="gracefully stop a LIVE local session and get its resume command "
+             "(for picking it up in another frontend, e.g. an Orca pane)")
+    hp.add_argument("session_id", nargs="?", default="",
+                    help="session id prefix or pid (omit to list live sessions)")
+    hp.add_argument("--force", action="store_true",
+                    help="hand off even while the session is busy (drops the in-flight turn)")
+    hp.set_defaults(func=cmd_handoff)
 
     rm = sub.add_parser("remotes", help="manage registered remote servers")
     rmsub = rm.add_subparsers(dest="remotes_cmd")
