@@ -135,99 +135,64 @@ def classify(window_dict: dict) -> dict:
     """
     status = window_dict.get("status", "unknown")
     idle = window_dict.get("idle_seconds", 0)
-    name = window_dict.get("name") or window_dict.get("project_name") or ""
     transcript = window_dict.get("transcript_path")
-
-    if status == "waiting":
-        return {
-            "triage": "waiting_perm",
-            "reason": window_dict.get("waiting_for") or "等待授权",
-            "suggestion": "去终端批准",
-        }
-
-    if status == "busy" and idle < IDLE_THRESHOLD:
-        return {
-            "triage": "working",
-            "reason": "正在工作",
-            "suggestion": "",
-        }
-
-    if status == "shell":
-        return {
-            "triage": "working",
-            "reason": "shell 进程运行中",
-            "suggestion": "",
-        }
-
-    if not transcript:
-        return {
-            "triage": "closeable",
-            "reason": "无 transcript 记录",
-            "suggestion": "可以关闭",
-        }
-
-    info = _last_assistant_info(transcript)
-    if not info:
-        return {
-            "triage": "closeable",
-            "reason": "transcript 为空",
-            "suggestion": "可以关闭",
-        }
-
-    stop = info["stop_reason"]
     idle_str = _format_idle(idle)
 
-    # A background signal only means "working" while the session is recently active.
-    # Past the closeable threshold (1h idle) fall through to the normal end_turn/
-    # completed/closeable logic so a stale background hint never pins `working` forever.
-    if info.get("has_pending_background") and idle < CLOSEABLE_THRESHOLD:
+    # 1. Genuinely active *right now*. Only these bypass the long-idle cap below.
+    if status == "busy" and idle < IDLE_THRESHOLD:
+        return {"triage": "working", "reason": "正在工作", "suggestion": ""}
+    if status == "shell" and idle < CLOSEABLE_THRESHOLD:
+        return {"triage": "working", "reason": "shell 进程运行中", "suggestion": ""}
+
+    info = _last_assistant_info(transcript) if transcript else None
+
+    # 2. Long-idle invariant (the one place the cap lives): anything idle past the
+    #    closeable threshold is NOT genuinely active/waiting/stalled — a stale status
+    #    flag (busy/shell/waiting stuck in session.json) or an abandoned prompt must
+    #    not pin an active badge. Placed before `waiting` so stale prompts fall here.
+    if idle >= CLOSEABLE_THRESHOLD:
+        if info and info.get("stop_reason") == "end_turn":
+            summary = info["last_text"].split("\n")[0][:80] if info.get("last_text") else ""
+            return {"triage": "closeable", "reason": f"已完成，空闲 {idle_str}。{summary}",
+                    "suggestion": "可以关闭"}
+        return {"triage": "closeable", "reason": f"空闲 {idle_str}，无活动", "suggestion": "可以关闭"}
+
+    # 3. Waiting for permission (recent — long-idle prompts became closeable above).
+    if status == "waiting":
+        return {"triage": "waiting_perm", "reason": window_dict.get("waiting_for") or "等待授权",
+                "suggestion": "去终端批准"}
+
+    # 4. Transcript-based states — everything below is idle < CLOSEABLE_THRESHOLD.
+    if not transcript:
+        return {"triage": "closeable", "reason": "无 transcript 记录", "suggestion": "可以关闭"}
+    if not info:
+        return {"triage": "closeable", "reason": "transcript 为空", "suggestion": "可以关闭"}
+
+    stop = info["stop_reason"]
+
+    # Real background task still running (queue-operation after end_turn, or a
+    # not-yet-ended turn mentioning it) — recent by construction, so still working.
+    if info.get("has_pending_background"):
         summary = info["last_text"].split("\n")[0][:80] if info["last_text"] else ""
-        return {
-            "triage": "working",
-            "reason": f"有后台任务在执行。{summary}",
-            "suggestion": "",
-        }
+        return {"triage": "working", "reason": f"有后台任务在执行。{summary}", "suggestion": ""}
 
     if stop == "end_turn":
         summary = info["last_text"].split("\n")[0][:80] if info["last_text"] else ""
-        if idle >= CLOSEABLE_THRESHOLD:
-            return {
-                "triage": "closeable",
-                "reason": f"已完成，空闲 {idle_str}。{summary}",
-                "suggestion": "可以关闭",
-            }
-        return {
-            "triage": "completed",
-            "reason": f"已完成，空闲 {idle_str}。{summary}",
-            "suggestion": "建议 review",
-        }
+        return {"triage": "completed", "reason": f"已完成，空闲 {idle_str}。{summary}",
+                "suggestion": "建议 review"}
 
     if stop == "tool_use":
         tool = info["last_tool"]
         if status == "busy":
-            return {
-                "triage": "working",
-                "reason": f"正在执行 {tool}" if tool else "正在工作",
-                "suggestion": "",
-            }
-        return {
-            "triage": "stalled",
-            "reason": f"停在 {tool}，空闲 {idle_str}" if tool else f"中途停止，空闲 {idle_str}",
-            "suggestion": "需要用户介入",
-        }
+            return {"triage": "working", "reason": f"正在执行 {tool}" if tool else "正在工作",
+                    "suggestion": ""}
+        return {"triage": "stalled",
+                "reason": f"停在 {tool}，空闲 {idle_str}" if tool else f"中途停止，空闲 {idle_str}",
+                "suggestion": "需要用户介入"}
 
-    # Fallback
-    if idle >= CLOSEABLE_THRESHOLD:
-        return {
-            "triage": "closeable",
-            "reason": f"空闲 {idle_str}",
-            "suggestion": "可以关闭",
-        }
-    return {
-        "triage": "completed" if idle >= IDLE_THRESHOLD else "working",
-        "reason": f"空闲 {idle_str}",
-        "suggestion": "",
-    }
+    # Fallback (idle < CLOSEABLE_THRESHOLD).
+    return {"triage": "completed" if idle >= IDLE_THRESHOLD else "working",
+            "reason": f"空闲 {idle_str}", "suggestion": ""}
 
 
 def _format_idle(seconds: int) -> str:

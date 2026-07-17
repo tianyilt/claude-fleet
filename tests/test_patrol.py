@@ -101,3 +101,74 @@ def test_classify_end_to_end_completed_despite_bg_prose(monkeypatch):
                         lambda tp: patrol._compute_last_assistant_info(lines))
     w = {"status": "idle", "idle_seconds": 90, "transcript_path": "/x", "name": "t"}
     assert patrol.classify(w)["triage"] == "completed"
+
+
+# ---------- unified long-idle cap: no active/needs-attention badge past 1h idle ----------
+HOUR_PLUS = patrol.CLOSEABLE_THRESHOLD + 400   # comfortably past the 1h cap
+
+
+def test_classify_shell_recent_working(monkeypatch):
+    monkeypatch.setattr(patrol, "_last_assistant_info", lambda tp: None)
+    w = {"status": "shell", "idle_seconds": 120, "transcript_path": None, "name": "t"}
+    assert patrol.classify(w)["triage"] == "working"
+
+
+def test_classify_shell_idle_past_1h_closeable(monkeypatch):
+    """The 3-day shell card: a shell session idle past the threshold is closeable,
+    not `working`."""
+    monkeypatch.setattr(patrol, "_last_assistant_info", lambda tp: None)
+    w = {"status": "shell", "idle_seconds": 256000, "transcript_path": None, "name": "t"}
+    assert patrol.classify(w)["triage"] == "closeable"
+
+
+def test_classify_waiting_recent_is_waiting_perm(monkeypatch):
+    monkeypatch.setattr(patrol, "_last_assistant_info", lambda tp: None)
+    w = {"status": "waiting", "idle_seconds": 30, "waiting_for": "批准 Bash",
+         "transcript_path": None, "name": "t"}
+    assert patrol.classify(w)["triage"] == "waiting_perm"
+
+
+def test_classify_waiting_past_1h_closeable(monkeypatch):
+    monkeypatch.setattr(patrol, "_last_assistant_info", lambda tp: None)
+    w = {"status": "waiting", "idle_seconds": HOUR_PLUS, "waiting_for": "批准 Bash",
+         "transcript_path": None, "name": "t"}
+    assert patrol.classify(w)["triage"] == "closeable"
+
+
+def test_classify_tooluse_busy_recent_working(monkeypatch):
+    # idle > IDLE_THRESHOLD (so not the fast busy path) but < 1h → still working via tool_use+busy
+    monkeypatch.setattr(patrol, "_last_assistant_info",
+                        lambda tp: _info(stop_reason="tool_use", last_tool="Bash", last_text=""))
+    w = {"status": "busy", "idle_seconds": 400, "transcript_path": "/x", "name": "t"}
+    assert patrol.classify(w)["triage"] == "working"
+
+
+def test_classify_tooluse_stale_busy_past_1h_closeable(monkeypatch):
+    """A stuck `busy` flag (pid alive, idle for hours) must not pin `working`."""
+    monkeypatch.setattr(patrol, "_last_assistant_info",
+                        lambda tp: _info(stop_reason="tool_use", last_tool="Bash", last_text=""))
+    w = {"status": "busy", "idle_seconds": HOUR_PLUS, "transcript_path": "/x", "name": "t"}
+    assert patrol.classify(w)["triage"] == "closeable"
+
+
+def test_classify_stalled_recent(monkeypatch):
+    monkeypatch.setattr(patrol, "_last_assistant_info",
+                        lambda tp: _info(stop_reason="tool_use", last_tool="Bash", last_text=""))
+    w = {"status": "idle", "idle_seconds": 600, "transcript_path": "/x", "name": "t"}
+    assert patrol.classify(w)["triage"] == "stalled"
+
+
+def test_classify_stalled_past_1h_closeable(monkeypatch):
+    monkeypatch.setattr(patrol, "_last_assistant_info",
+                        lambda tp: _info(stop_reason="tool_use", last_tool="Bash", last_text=""))
+    w = {"status": "idle", "idle_seconds": HOUR_PLUS, "transcript_path": "/x", "name": "t"}
+    assert patrol.classify(w)["triage"] == "closeable"
+
+
+def test_classify_endturn_past_1h_closeable_with_done_wording(monkeypatch):
+    monkeypatch.setattr(patrol, "_last_assistant_info",
+                        lambda tp: _info(stop_reason="end_turn", last_text="迁移完成，端口表已发"))
+    w = {"status": "idle", "idle_seconds": HOUR_PLUS, "transcript_path": "/x", "name": "t"}
+    r = patrol.classify(w)
+    assert r["triage"] == "closeable"
+    assert "已完成" in r["reason"]
