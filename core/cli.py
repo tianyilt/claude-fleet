@@ -450,6 +450,13 @@ def cmd_handoff(args) -> int:
     return EXIT_OK
 
 
+# ---------- live board ----------
+
+def cmd_live(args) -> int:
+    from . import live
+    return live.run(interval=max(0.5, args.interval), once=args.once)
+
+
 # ---------- remotes ----------
 
 def cmd_remotes(args) -> int:
@@ -541,6 +548,15 @@ def _build_parser() -> argparse.ArgumentParser:
     hp.add_argument("--force", action="store_true",
                     help="hand off even while the session is busy (drops the in-flight turn)")
     hp.set_defaults(func=cmd_handoff)
+
+    lv = sub.add_parser(
+        "live",
+        help="live board of running sessions with one-key handoff "
+             "(built to run inside an Orca pane; read-only without a tty)")
+    lv.add_argument("--interval", type=float, default=2.0,
+                    help="refresh interval in seconds (default 2)")
+    lv.add_argument("--once", action="store_true", help="print one snapshot and exit")
+    lv.set_defaults(func=cmd_live)
 
     rm = sub.add_parser("remotes", help="manage registered remote servers")
     rmsub = rm.add_subparsers(dest="remotes_cmd")
