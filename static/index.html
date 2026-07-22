@@ -445,9 +445,6 @@
       <span x-show="unreadCount" class="text-blue-600 font-medium" x-text="'● ' + unreadCount + ' 未读'"></span>
       <button @click="closeAll()" x-show="closeableWindows().length"
               class="hover:text-gray-800" x-text="'关闭可关闭 (' + closeableWindows().length + ')'"></button>
-      <button @click="toggleNotify()" :class="notifyEnabled ? 'text-blue-600 font-medium' : ''"
-              class="hover:text-gray-800" :title="notifyEnabled ? '完成/授权时桌面通知(已开)' : '开启完成/授权桌面通知'"
-              x-text="notifyEnabled ? '🔔 通知' : '🔕 通知'"></button>
       <button @click="expandAllGroups(true)" class="hover:text-gray-800">展开全部</button>
       <button @click="expandAllGroups(false)" class="hover:text-gray-800">收起全部</button>
     </div>
@@ -466,10 +463,6 @@
           <span x-show="g.attention" class="text-[10px] px-1.5 rounded shrink-0 bg-amber-200 text-amber-800">需处理</span>
           <div class="flex items-center gap-2.5 ml-auto shrink-0">
             <div class="flex items-center gap-1" @click.stop>
-              <button x-show="reviewableWindows(g.windows).length"
-                      @click="verifyAll(g.windows)"
-                      class="text-[10px] px-1.5 py-0.5 rounded border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100"
-                      x-text="'全部验收 ' + reviewableWindows(g.windows).length"></button>
               <button x-show="closeableWindows(g.windows).length > 1"
                       @click="closeAll(g.windows)"
                       class="text-[10px] px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:bg-gray-100"
@@ -488,16 +481,15 @@
         <div x-show="!isCollapsed(g)" class="divide-y border-t">
           <template x-for="w in g.windows" :key="w.pid">
             <div class="flex items-center gap-2 px-4 py-2 hover:bg-blue-50/40 cursor-pointer"
-                 :class="{ 'bg-red-50': et(w) === 'waiting_perm', 'bg-blue-50/60': expandedPid === w.pid, 'opacity-60': w.stale }"
+                 :class="{ 'bg-red-50': w.triage === 'waiting_perm', 'bg-blue-50/60': expandedPid === w.pid, 'opacity-60': w.stale }"
                  @click="cardTimeline(w); markSeen(w)">
               <span class="w-1.5 shrink-0"><span x-show="isUnread(w)" class="block w-1.5 h-1.5 rounded-full bg-blue-500" title="未读"></span></span>
-              <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0" :class="'triage-' + et(w)"
-                    :title="et(w)"></span>
+              <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0" :class="'triage-' + w.triage"
+                    :title="w.triage"></span>
               <span class="text-sm truncate shrink-0 max-w-[15rem]" :class="isUnread(w) ? 'font-bold' : 'font-medium'" x-text="cardName(w)"></span>
               <span x-show="w.platform === 'codex'" class="text-[9px] px-1 rounded text-white bg-green-500 shrink-0">codex</span>
               <span x-show="w.stale" class="text-[9px] px-1 rounded bg-gray-200 text-gray-600 shrink-0"
                     title="离线缓存,进程可能已退出">⚠</span>
-              <span x-show="w.triage === 'completed' && isReviewed(w)" class="text-[9px] px-1 rounded bg-gray-100 text-gray-500 shrink-0">✓已验收</span>
               <!-- progress-at-a-glance: current task / triage reason inline -->
               <span class="text-xs text-gray-500 italic truncate flex-1 min-w-0" x-text="w.current_task || w.triage_reason"></span>
               <span x-show="w.background_tasks?.length" class="text-[10px] text-amber-700 bg-amber-50 rounded px-1.5 shrink-0"
@@ -509,20 +501,16 @@
               <div class="flex gap-1 shrink-0" @click.stop>
                 <button x-show="w.tty" @click="focusWindow(w.pid)"
                         class="text-[11px] px-1.5 py-0.5 rounded border transition"
-                        :class="et(w) === 'waiting_perm' ? 'border-red-300 text-red-600 hover:bg-red-50 font-medium' : 'border-gray-200 text-gray-600 hover:bg-gray-100'">Focus</button>
+                        :class="w.triage === 'waiting_perm' ? 'border-red-300 text-red-600 hover:bg-red-50 font-medium' : 'border-gray-200 text-gray-600 hover:bg-gray-100'">Focus</button>
                 <button x-show="w.source && w.source !== 'local'" @click="resumeSession(w)"
                         class="text-[11px] px-1.5 py-0.5 rounded border border-teal-200 text-teal-600 hover:bg-teal-50">Resume</button>
-                <!-- 验收 gate: mark a completed session reviewed → it flows to 可关闭 -->
-                <button x-show="w.platform !== 'codex' && w.triage === 'completed' && !isReviewed(w)"
-                        @click="verify(w)"
-                        class="text-[11px] px-1.5 py-0.5 rounded border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 font-medium">✓ 验收</button>
-                <button x-show="w.platform !== 'codex' && (w.triage === 'stalled' || (w.triage === 'completed' && !isReviewed(w)))"
+                <button x-show="w.platform !== 'codex' && (w.triage === 'completed' || w.triage === 'stalled')"
                         @click="reviewWindow(w.pid)"
                         class="text-[11px] px-1.5 py-0.5 rounded border border-blue-200 text-blue-600 hover:bg-blue-50"
                         :class="reviewStatuses[w.pid]==='running' ? 'opacity-50 cursor-wait' : ''"
                         :disabled="reviewStatuses[w.pid]==='running'"
                         x-text="reviewStatuses[w.pid]==='running' ? 'Reviewing…' : (reviewStatuses[w.pid]==='done' ? 'See Review' : 'Review')"></button>
-                <button x-show="w.platform !== 'codex' && et(w) === 'closeable'"
+                <button x-show="w.platform !== 'codex' && w.triage === 'closeable'"
                         @click="if(confirm('Close ' + (w.name||w.project_name) + '?')) closeWindow(w.pid)"
                         class="text-[11px] px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:bg-gray-100">Close</button>
                 <button x-show="w.platform !== 'codex'" @click="forkWindow(w.pid)"
@@ -941,9 +929,6 @@ function fleet() {
     groupBy: localStorage.getItem('fleet_group_by') || 'state',
     collapsedGroups: JSON.parse(localStorage.getItem('fleet_collapsed_groups') || '{}'),
     seenAttention: JSON.parse(localStorage.getItem('fleet_seen') || '{}'),   // {sid: updated_at last viewed}
-    reviewed: JSON.parse(localStorage.getItem('fleet_reviewed') || '{}'),    // {sid: updated_at verified}
-    notifyEnabled: localStorage.getItem('fleet_notify') === '1',
-    _notified: {},   // {sid: updated_at already notified} — dedupe browser notifications
     searchQuery: '',
     searchResults: null,
     expandedPid: null,
@@ -1013,14 +998,14 @@ function fleet() {
     },
     _rollup(windows) {
       const r = { working: 0, waiting_perm: 0, stalled: 0, completed: 0, closeable: 0 };
-      for (const w of windows) { const t = this.et(w); if (r[t] != null) r[t]++; }
+      for (const w of windows) if (r[w.triage] != null) r[w.triage]++;
       return r;
     },
     _sortRows(windows) {
       // unread attention items first, then triage priority, then most-recent
       windows.sort((a, b) =>
         (this.isUnread(b) - this.isUnread(a)) ||
-        (TRIAGE_ORDER[this.et(a)] ?? 9) - (TRIAGE_ORDER[this.et(b)] ?? 9) ||
+        (TRIAGE_ORDER[a.triage] ?? 9) - (TRIAGE_ORDER[b.triage] ?? 9) ||
         (a.idle_seconds || 0) - (b.idle_seconds || 0));
       return windows;
     },
@@ -1035,7 +1020,7 @@ function fleet() {
         groups[key].windows.push(w);
       }
       const arr = Object.values(groups).map(g => {
-        const attention = g.windows.some(w => ATTENTION_STATES.has(this.et(w)));
+        const attention = g.windows.some(w => ATTENTION_STATES.has(w.triage));
         return { ...g, rollup: this._rollup(this._sortRows(g.windows)), attention };
       });
       arr.sort((a, b) => (b.attention - a.attention) || a.name.localeCompare(b.name));
@@ -1045,7 +1030,7 @@ function fleet() {
       const arr = [];
       for (const b of STATE_BUCKETS) {
         const set = new Set(b.triages);
-        const windows = this._sortRows(this.filteredWindows.filter(w => set.has(this.et(w))));
+        const windows = this._sortRows(this.filteredWindows.filter(w => set.has(w.triage)));
         if (!windows.length) continue;
         arr.push({ key: 'state:' + b.key, name: b.name, source: null,
                    windows, rollup: this._rollup(windows), attention: b.attention });
@@ -1072,25 +1057,11 @@ function fleet() {
       localStorage.setItem('fleet_group_by', mode);
     },
 
-    // ---- effective triage: a completed session you've 验收'd flows out of the
-    //      待验收 lane into 可关闭 (the review→done gate). ----
-    et(w) {
-      if (w.triage === 'completed' && this.isReviewed(w)) return 'closeable';
-      return w.triage;
-    },
-    isReviewed(w) {
-      const r = this.reviewed[w.session_id];
-      return r != null && r >= (w.updated_at || 0);
-    },
-    verify(w) {
-      this.reviewed = { ...this.reviewed, [w.session_id]: (w.updated_at || Date.now()) };
-      localStorage.setItem('fleet_reviewed', JSON.stringify(this.reviewed));
-    },
-
     // ---- unread: an attention session you haven't looked at since it last
-    //      changed shows bold, and clears when you open it (Orca's bolded-until-viewed). ----
+    //      changed shows bold, and clears when you open it (Orca's bolded-until-viewed).
+    //      This IS the "seen / acknowledged" mechanism — no separate verify step. ----
     isUnread(w) {
-      if (!ATTENTION_STATES.has(this.et(w))) return false;
+      if (!ATTENTION_STATES.has(w.triage)) return false;
       const s = this.seenAttention[w.session_id];
       return s == null || s < (w.updated_at || 0);
     },
@@ -1102,47 +1073,14 @@ function fleet() {
       return this.windows.filter(w => this.isUnread(w)).length;
     },
 
-    // ---- batch operations ----
-    closeableWindows(list) { return (list || this.windows).filter(w => this.et(w) === 'closeable' && w.platform !== 'codex'); },
-    reviewableWindows(list) { return (list || this.windows).filter(w => w.triage === 'completed' && !this.isReviewed(w)); },
+    // ---- batch: close all closeable ----
+    closeableWindows(list) { return (list || this.windows).filter(w => w.triage === 'closeable' && w.platform !== 'codex'); },
     closeAll(list) {
       const targets = this.closeableWindows(list);
       if (!targets.length) return;
       if (!confirm('关闭 ' + targets.length + ' 个可关闭会话?')) return;
       targets.forEach(w => this.closeWindow(w.pid));
       this.toast('已请求关闭 ' + targets.length + ' 个会话');
-    },
-    verifyAll(list) {
-      const targets = this.reviewableWindows(list);
-      targets.forEach(w => this.verify(w));
-      if (targets.length) this.toast('已验收 ' + targets.length + ' 个会话');
-    },
-
-    // ---- browser notifications when a session needs attention (Orca finish-notify) ----
-    toggleNotify() {
-      if (!this.notifyEnabled && 'Notification' in window && Notification.permission !== 'granted') {
-        Notification.requestPermission().then(p => {
-          this.notifyEnabled = (p === 'granted');
-          localStorage.setItem('fleet_notify', this.notifyEnabled ? '1' : '0');
-        });
-        return;
-      }
-      this.notifyEnabled = !this.notifyEnabled;
-      localStorage.setItem('fleet_notify', this.notifyEnabled ? '1' : '0');
-    },
-    _maybeNotify() {
-      if (!this.notifyEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
-      for (const w of this.windows) {
-        const t = this.et(w);
-        if (t !== 'waiting_perm' && t !== 'completed') continue;
-        const stamp = w.updated_at || 0;
-        if (this._notified[w.session_id] >= stamp) continue;   // already told about this state
-        if (this.isUnread(w)) {
-          this._notified[w.session_id] = stamp;
-          const label = t === 'waiting_perm' ? '需要授权' : '已完成待验收';
-          try { new Notification('Fleet · ' + label, { body: this.cardName(w) + ' — ' + (w.triage_reason || ''), tag: 'fleet-' + w.session_id }); } catch (e) {}
-        }
-      }
     },
 
     init() {
@@ -1216,7 +1154,6 @@ function fleet() {
     applySnapshot(snap) {
       this.windows = snap.windows || [];
       this.counts = snap.counts || this.counts;
-      this._maybeNotify();
     },
 
     formatIdle(seconds) {

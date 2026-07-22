@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from core import actions, codex, history, insights, memory, patrol, perms, plans, remote, search, sessions, share, skills, terminal, transcripts
+from core import actions, codex, history, insights, memory, notify, patrol, perms, plans, remote, search, sessions, share, skills, terminal, transcripts
 
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
@@ -201,6 +201,12 @@ async def _watcher() -> None:
             snap = await loop.run_in_executor(None, _enriched_snapshot)
             sig = state.diff_signature(snap)
             state.last_snapshot = snap
+            # Desktop notify on edges into waiting_perm / completed (macOS, opt-out
+            # via FLEET_NOTIFY=0). Reaches you even with no browser tab open.
+            try:
+                notify.notify_transitions(snap["windows"])
+            except Exception as e:
+                print(f"[notify] error: {e}")
             if sig != state.last_signature:
                 state.last_signature = sig
                 payload = json.dumps(snap)
