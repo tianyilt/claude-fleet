@@ -430,102 +430,110 @@
     </div>
   </div>
 
-  <!-- ===== Window cards grid ===== -->
-  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-    <template x-for="w in filteredWindows" :key="w.pid">
-      <div class="bg-white rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer relative"
-           :class="{ 'ring-2 ring-red-400': w.triage === 'waiting_perm', 'ring-2 ring-blue-400': expandedPid === w.pid, 'opacity-60': w.stale }"
-           @click="cardTimeline(w)">
-        <div class="p-4 pb-2">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="inline-block w-3 h-3 rounded-full shrink-0" :class="'triage-' + w.triage"></span>
-            <span class="font-semibold text-sm truncate" x-text="cardName(w)"></span>
-            <span x-show="w.platform === 'codex'"
-                  class="text-[10px] px-1.5 rounded text-white shrink-0 bg-green-500">codex</span>
-            <span x-show="w.source && w.source !== 'local'"
-                  class="text-[10px] px-1.5 rounded shrink-0 bg-teal-100 text-teal-700"
-                  :title="'remote server: ' + w.source" x-text="'⮬ ' + w.source"></span>
-            <span x-show="w.stale"
-                  class="text-[10px] px-1.5 rounded shrink-0 bg-gray-200 text-gray-600"
-                  title="服务器连不上,这是上次成功采集的缓存,进程可能已退出">⚠ 离线·缓存</span>
-            <span class="text-[10px] px-1.5 rounded-full text-white shrink-0" :class="'triage-' + w.triage"
-                  x-text="w.triage"></span>
+  <!-- ===== Grouped session board (Orca-style: collapse by project, roll-up status) ===== -->
+  <div class="flex items-center justify-between mb-2 text-xs text-gray-500">
+    <div class="flex items-center gap-2">
+      <span x-text="filteredWindows.length + ' 会话 · ' + groupedWindows.length + ' 组'"></span>
+      <span class="inline-flex rounded-md border overflow-hidden ml-1">
+        <button @click="setGroupBy('project')" class="px-2 py-0.5 transition"
+                :class="groupBy === 'project' ? 'bg-gray-800 text-white' : 'hover:bg-gray-100'">按项目</button>
+        <button @click="setGroupBy('state')" class="px-2 py-0.5 transition border-l"
+                :class="groupBy === 'state' ? 'bg-gray-800 text-white' : 'hover:bg-gray-100'">按状态</button>
+      </span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span x-show="unreadCount" class="text-blue-600 font-medium" x-text="'● ' + unreadCount + ' 未读'"></span>
+      <button @click="closeAll()" x-show="closeableWindows().length"
+              class="hover:text-gray-800" x-text="'关闭可关闭 (' + closeableWindows().length + ')'"></button>
+      <button @click="toggleNotify()" :class="notifyEnabled ? 'text-blue-600 font-medium' : ''"
+              class="hover:text-gray-800" :title="notifyEnabled ? '完成/授权时桌面通知(已开)' : '开启完成/授权桌面通知'"
+              x-text="notifyEnabled ? '🔔 通知' : '🔕 通知'"></button>
+      <button @click="expandAllGroups(true)" class="hover:text-gray-800">展开全部</button>
+      <button @click="expandAllGroups(false)" class="hover:text-gray-800">收起全部</button>
+    </div>
+  </div>
+  <div class="space-y-2.5">
+    <template x-for="g in groupedWindows" :key="g.key">
+      <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <!-- group header: name + roll-up status dots, scannable without expanding -->
+        <div class="flex items-center gap-2 px-4 py-2.5 cursor-pointer select-none hover:bg-gray-50"
+             :class="g.attention ? 'bg-amber-50' : ''"
+             @click="toggleGroup(g)">
+          <span class="text-gray-400 text-xs w-3 shrink-0" x-text="isCollapsed(g) ? '▸' : '▾'"></span>
+          <span class="font-semibold text-sm truncate" x-text="g.name"></span>
+          <span x-show="g.source && g.source !== 'local'"
+                class="text-[10px] px-1.5 rounded shrink-0 bg-teal-100 text-teal-700" x-text="'⮬ ' + g.source"></span>
+          <span x-show="g.attention" class="text-[10px] px-1.5 rounded shrink-0 bg-amber-200 text-amber-800">需处理</span>
+          <div class="flex items-center gap-2.5 ml-auto shrink-0">
+            <div class="flex items-center gap-1" @click.stop>
+              <button x-show="reviewableWindows(g.windows).length"
+                      @click="verifyAll(g.windows)"
+                      class="text-[10px] px-1.5 py-0.5 rounded border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100"
+                      x-text="'全部验收 ' + reviewableWindows(g.windows).length"></button>
+              <button x-show="closeableWindows(g.windows).length > 1"
+                      @click="closeAll(g.windows)"
+                      class="text-[10px] px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:bg-gray-100"
+                      x-text="'关闭全部 ' + closeableWindows(g.windows).length"></button>
+            </div>
+            <template x-for="s in ['waiting_perm','stalled','completed','working','closeable']" :key="s">
+              <span x-show="g.rollup[s]" class="inline-flex items-center gap-1" :title="s">
+                <span class="inline-block w-2.5 h-2.5 rounded-full" :class="'triage-'+s"></span>
+                <span class="text-xs text-gray-600" x-text="g.rollup[s]"></span>
+              </span>
+            </template>
+            <span class="text-xs text-gray-400" x-text="'共 ' + g.windows.length"></span>
           </div>
-          <div class="text-xs text-gray-500 truncate" x-text="w.cwd"></div>
         </div>
-        <div class="px-4 pb-2 text-xs space-y-1">
-          <div class="text-gray-600 truncate" x-show="w.current_task" x-text="w.current_task"></div>
-          <div class="text-gray-500 italic" x-text="w.triage_reason"></div>
-          <!-- How long it's been blocked waiting for approval — a 2h-old prompt you
-               forgot reads very differently from one that just popped up. -->
-          <div x-show="w.triage === 'waiting_perm' && w.idle_seconds != null"
-               class="text-red-600 font-medium"
-               x-text="'⏳ 已等待批准 ' + formatIdle(w.idle_seconds).replace(' ago','')"></div>
-          <!-- Review verdict -->
-          <div x-show="reviewVerdicts[w.pid]"
-               class="bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-800 max-h-32 overflow-y-auto whitespace-pre-wrap"
-               x-text="reviewVerdicts[w.pid]"></div>
-          <!-- Background tasks -->
-          <div x-show="w.background_tasks?.length" class="space-y-0.5">
-            <template x-for="(bt, i) in (w.background_tasks||[])" :key="i">
-              <div class="text-[10px] text-amber-700 bg-amber-50 rounded px-1.5 py-0.5 truncate">
-                <span class="font-medium" x-text="bt.type === 'monitor' ? 'Monitor' : 'Bash bg'"></span>:
-                <span x-text="bt.description || bt.command"></span>
+        <!-- dense rows: one line per session -->
+        <div x-show="!isCollapsed(g)" class="divide-y border-t">
+          <template x-for="w in g.windows" :key="w.pid">
+            <div class="flex items-center gap-2 px-4 py-2 hover:bg-blue-50/40 cursor-pointer"
+                 :class="{ 'bg-red-50': et(w) === 'waiting_perm', 'bg-blue-50/60': expandedPid === w.pid, 'opacity-60': w.stale }"
+                 @click="cardTimeline(w); markSeen(w)">
+              <span class="w-1.5 shrink-0"><span x-show="isUnread(w)" class="block w-1.5 h-1.5 rounded-full bg-blue-500" title="未读"></span></span>
+              <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0" :class="'triage-' + et(w)"
+                    :title="et(w)"></span>
+              <span class="text-sm truncate shrink-0 max-w-[15rem]" :class="isUnread(w) ? 'font-bold' : 'font-medium'" x-text="cardName(w)"></span>
+              <span x-show="w.platform === 'codex'" class="text-[9px] px-1 rounded text-white bg-green-500 shrink-0">codex</span>
+              <span x-show="w.stale" class="text-[9px] px-1 rounded bg-gray-200 text-gray-600 shrink-0"
+                    title="离线缓存,进程可能已退出">⚠</span>
+              <span x-show="w.triage === 'completed' && isReviewed(w)" class="text-[9px] px-1 rounded bg-gray-100 text-gray-500 shrink-0">✓已验收</span>
+              <!-- progress-at-a-glance: current task / triage reason inline -->
+              <span class="text-xs text-gray-500 italic truncate flex-1 min-w-0" x-text="w.current_task || w.triage_reason"></span>
+              <span x-show="w.background_tasks?.length" class="text-[10px] text-amber-700 bg-amber-50 rounded px-1.5 shrink-0"
+                    :title="(w.background_tasks||[]).map(b=>b.description||b.command).join('\n')"
+                    x-text="'⚙ ' + w.background_tasks.length"></span>
+              <span class="text-[11px] text-gray-400 shrink-0 tabular-nums" x-show="w.idle_seconds != null"
+                    x-text="formatIdle(w.idle_seconds)"></span>
+              <!-- inline actions -->
+              <div class="flex gap-1 shrink-0" @click.stop>
+                <button x-show="w.tty" @click="focusWindow(w.pid)"
+                        class="text-[11px] px-1.5 py-0.5 rounded border transition"
+                        :class="et(w) === 'waiting_perm' ? 'border-red-300 text-red-600 hover:bg-red-50 font-medium' : 'border-gray-200 text-gray-600 hover:bg-gray-100'">Focus</button>
+                <button x-show="w.source && w.source !== 'local'" @click="resumeSession(w)"
+                        class="text-[11px] px-1.5 py-0.5 rounded border border-teal-200 text-teal-600 hover:bg-teal-50">Resume</button>
+                <!-- 验收 gate: mark a completed session reviewed → it flows to 可关闭 -->
+                <button x-show="w.platform !== 'codex' && w.triage === 'completed' && !isReviewed(w)"
+                        @click="verify(w)"
+                        class="text-[11px] px-1.5 py-0.5 rounded border border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 font-medium">✓ 验收</button>
+                <button x-show="w.platform !== 'codex' && (w.triage === 'stalled' || (w.triage === 'completed' && !isReviewed(w)))"
+                        @click="reviewWindow(w.pid)"
+                        class="text-[11px] px-1.5 py-0.5 rounded border border-blue-200 text-blue-600 hover:bg-blue-50"
+                        :class="reviewStatuses[w.pid]==='running' ? 'opacity-50 cursor-wait' : ''"
+                        :disabled="reviewStatuses[w.pid]==='running'"
+                        x-text="reviewStatuses[w.pid]==='running' ? 'Reviewing…' : (reviewStatuses[w.pid]==='done' ? 'See Review' : 'Review')"></button>
+                <button x-show="w.platform !== 'codex' && et(w) === 'closeable'"
+                        @click="if(confirm('Close ' + (w.name||w.project_name) + '?')) closeWindow(w.pid)"
+                        class="text-[11px] px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:bg-gray-100">Close</button>
+                <button x-show="w.platform !== 'codex'" @click="forkWindow(w.pid)"
+                        class="text-[11px] px-1.5 py-0.5 rounded border border-green-200 text-green-600 hover:bg-green-50">Fork</button>
               </div>
-            </template>
-          </div>
-          <!-- Skill tags -->
-          <div class="flex gap-1 flex-wrap" x-show="w.skills_used?.length || w.memory_ops?.length">
-            <template x-for="sk in (w.skills_used||[])" :key="sk">
-              <span class="bg-purple-50 text-purple-600 text-[10px] px-1.5 rounded" x-text="sk"></span>
-            </template>
-            <template x-for="m in (w.memory_ops||[])" :key="m.name+m.operation">
-              <span class="text-[10px] px-1.5 rounded"
-                    :class="m.operation === 'read' ? 'bg-sky-50 text-sky-600' : 'bg-pink-50 text-pink-600'"
-                    x-text="(m.operation === 'read' ? '↓' : '↑') + m.name"></span>
-            </template>
-          </div>
-          <div class="text-gray-400">
-            <span x-show="w.idle_seconds != null" x-text="formatIdle(w.idle_seconds)"></span>
-            <span x-show="w.idle_seconds != null"> · </span>
-            pid <span x-text="w.pid"></span>
-          </div>
-        </div>
-        <div class="px-4 pb-3 pt-1 flex gap-2 flex-wrap" @click.stop>
-          <!-- Focus raises the terminal tab owning this tty; headless (IDE/SDK)
-               sessions have no terminal, so there's nothing to focus → hide it. -->
-          <button x-show="w.tty" @click="focusWindow(w.pid)"
-                  class="text-xs px-2 py-1 rounded border transition"
-                  :class="w.triage === 'waiting_perm' ? 'border-red-300 text-red-600 hover:bg-red-50 font-medium' : 'border-gray-200 text-gray-600 hover:bg-gray-100'">
-            Focus</button>
-          <!-- Remote sessions have no local tty to focus → Resume/Fork open a local
-               terminal that SSHes in and resumes/forks there. -->
-          <button x-show="w.source && w.source !== 'local'" @click="resumeSession(w)"
-                  class="text-xs border border-teal-200 text-teal-600 px-2 py-1 rounded hover:bg-teal-50 transition">
-            Resume (ssh)</button>
-          <button x-show="w.source && w.source !== 'local'" @click="forkHistorySession(w)"
-                  class="text-xs border border-green-200 text-green-600 px-2 py-1 rounded hover:bg-green-50 transition">
-            Fork (ssh)</button>
-          <!-- No transcript to show for an unidentified codex terminal → hide Timeline. -->
-          <button x-show="w.transcript_path || w.platform !== 'codex'" @click="cardTimeline(w)"
-                  class="text-xs border border-gray-200 text-gray-600 px-2 py-1 rounded hover:bg-gray-100 transition">
-            Timeline</button>
-          <button x-show="w.platform !== 'codex' && (w.triage === 'completed' || w.triage === 'stalled')"
-                  @click="reviewWindow(w.pid)"
-                  class="text-xs border border-blue-200 text-blue-600 px-2 py-1 rounded hover:bg-blue-50 transition"
-                  :class="reviewStatuses[w.pid]==='running' ? 'opacity-50 cursor-wait' : ''"
-                  :disabled="reviewStatuses[w.pid]==='running'">
-            <span x-text="reviewStatuses[w.pid]==='running' ? 'Reviewing...' : (reviewStatuses[w.pid]==='done' ? 'See Review' : 'Review')"></span></button>
-          <button x-show="w.platform !== 'codex' && w.triage === 'closeable'"
-                  @click="if(confirm('Close ' + (w.name||w.project_name) + '?')) closeWindow(w.pid)"
-                  class="text-xs border border-gray-300 text-gray-500 px-2 py-1 rounded hover:bg-gray-100 transition">
-            Close</button>
-          <button x-show="w.platform !== 'codex'" @click="forkWindow(w.pid)"
-                  class="text-xs border border-green-200 text-green-600 px-2 py-1 rounded hover:bg-green-50 transition">
-            Fork</button>
+            </div>
+          </template>
         </div>
       </div>
     </template>
+    <div x-show="groupedWindows.length === 0" class="text-center text-gray-400 py-10 text-sm">没有匹配的会话</div>
   </div>
 
   <!-- ===== Timeline panel ===== -->
@@ -912,11 +920,30 @@
 </div>
 
 <script>
+// Same priority axis as the backend (core/patrol.py TRIAGE_PRIORITY) — used to
+// order rows within a group and to decide which triage states need attention.
+const TRIAGE_ORDER = { waiting_perm: 0, stalled: 1, completed: 2, working: 3, closeable: 4 };
+const ATTENTION_STATES = new Set(['waiting_perm', 'stalled', 'completed']);
+// "By state" grouping = a lightweight kanban flow (Orca-style pipeline). Fixed
+// left-to-right order; 需处理 / 待验收 are the attention buckets.
+const STATE_BUCKETS = [
+  { key: 'need',    name: '需处理', triages: ['waiting_perm', 'stalled'], attention: true },
+  { key: 'working', name: '进行中', triages: ['working'],                 attention: false },
+  { key: 'review',  name: '待验收', triages: ['completed'],               attention: true },
+  { key: 'done',    name: '可关闭', triages: ['closeable'],               attention: false },
+];
+
 function fleet() {
   return {
     windows: [],
     counts: { total: 0, busy: 0, waiting: 0, idle: 0 },
     statusFilter: '',
+    groupBy: localStorage.getItem('fleet_group_by') || 'state',
+    collapsedGroups: JSON.parse(localStorage.getItem('fleet_collapsed_groups') || '{}'),
+    seenAttention: JSON.parse(localStorage.getItem('fleet_seen') || '{}'),   // {sid: updated_at last viewed}
+    reviewed: JSON.parse(localStorage.getItem('fleet_reviewed') || '{}'),    // {sid: updated_at verified}
+    notifyEnabled: localStorage.getItem('fleet_notify') === '1',
+    _notified: {},   // {sid: updated_at already notified} — dedupe browser notifications
     searchQuery: '',
     searchResults: null,
     expandedPid: null,
@@ -971,6 +998,151 @@ function fleet() {
     get filteredWindows() {
       if (!this.statusFilter) return this.windows;
       return this.windows.filter(w => w.triage === this.statusFilter);
+    },
+
+    // Group the (filtered) sessions by project/worktree — Orca's organizing axis.
+    // Each group carries a roll-up count per triage state so the header is
+    // scannable without expanding, and an `attention` flag that floats it to the
+    // top and auto-expands it.
+    groupKeyFor(w) {
+      const proj = w.project_name || (w.cwd ? w.cwd.split('/').filter(Boolean).pop() : '') || 'unknown';
+      return (w.source && w.source !== 'local' ? w.source + ':' : '') + proj;
+    },
+    get groupedWindows() {
+      return this.groupBy === 'state' ? this._groupByState() : this._groupByProject();
+    },
+    _rollup(windows) {
+      const r = { working: 0, waiting_perm: 0, stalled: 0, completed: 0, closeable: 0 };
+      for (const w of windows) { const t = this.et(w); if (r[t] != null) r[t]++; }
+      return r;
+    },
+    _sortRows(windows) {
+      // unread attention items first, then triage priority, then most-recent
+      windows.sort((a, b) =>
+        (this.isUnread(b) - this.isUnread(a)) ||
+        (TRIAGE_ORDER[this.et(a)] ?? 9) - (TRIAGE_ORDER[this.et(b)] ?? 9) ||
+        (a.idle_seconds || 0) - (b.idle_seconds || 0));
+      return windows;
+    },
+    _groupByProject() {
+      const groups = {};
+      for (const w of this.filteredWindows) {
+        const key = this.groupKeyFor(w);
+        if (!groups[key]) {
+          const proj = w.project_name || (w.cwd ? w.cwd.split('/').filter(Boolean).pop() : '') || 'unknown';
+          groups[key] = { key, name: proj, source: w.source, windows: [] };
+        }
+        groups[key].windows.push(w);
+      }
+      const arr = Object.values(groups).map(g => {
+        const attention = g.windows.some(w => ATTENTION_STATES.has(this.et(w)));
+        return { ...g, rollup: this._rollup(this._sortRows(g.windows)), attention };
+      });
+      arr.sort((a, b) => (b.attention - a.attention) || a.name.localeCompare(b.name));
+      return arr;
+    },
+    _groupByState() {
+      const arr = [];
+      for (const b of STATE_BUCKETS) {
+        const set = new Set(b.triages);
+        const windows = this._sortRows(this.filteredWindows.filter(w => set.has(this.et(w))));
+        if (!windows.length) continue;
+        arr.push({ key: 'state:' + b.key, name: b.name, source: null,
+                   windows, rollup: this._rollup(windows), attention: b.attention });
+      }
+      return arr;   // already in pipeline order
+    },
+    isCollapsed(g) {
+      const explicit = this.collapsedGroups[g.key];
+      // Default: collapsed, EXCEPT groups that need attention auto-expand.
+      return explicit === undefined ? !g.attention : explicit;
+    },
+    toggleGroup(g) {
+      this.collapsedGroups = { ...this.collapsedGroups, [g.key]: !this.isCollapsed(g) };
+      localStorage.setItem('fleet_collapsed_groups', JSON.stringify(this.collapsedGroups));
+    },
+    expandAllGroups(open) {
+      const next = {};
+      for (const g of this.groupedWindows) next[g.key] = !open;
+      this.collapsedGroups = next;
+      localStorage.setItem('fleet_collapsed_groups', JSON.stringify(next));
+    },
+    setGroupBy(mode) {
+      this.groupBy = mode;
+      localStorage.setItem('fleet_group_by', mode);
+    },
+
+    // ---- effective triage: a completed session you've 验收'd flows out of the
+    //      待验收 lane into 可关闭 (the review→done gate). ----
+    et(w) {
+      if (w.triage === 'completed' && this.isReviewed(w)) return 'closeable';
+      return w.triage;
+    },
+    isReviewed(w) {
+      const r = this.reviewed[w.session_id];
+      return r != null && r >= (w.updated_at || 0);
+    },
+    verify(w) {
+      this.reviewed = { ...this.reviewed, [w.session_id]: (w.updated_at || Date.now()) };
+      localStorage.setItem('fleet_reviewed', JSON.stringify(this.reviewed));
+    },
+
+    // ---- unread: an attention session you haven't looked at since it last
+    //      changed shows bold, and clears when you open it (Orca's bolded-until-viewed). ----
+    isUnread(w) {
+      if (!ATTENTION_STATES.has(this.et(w))) return false;
+      const s = this.seenAttention[w.session_id];
+      return s == null || s < (w.updated_at || 0);
+    },
+    markSeen(w) {
+      this.seenAttention = { ...this.seenAttention, [w.session_id]: (w.updated_at || Date.now()) };
+      localStorage.setItem('fleet_seen', JSON.stringify(this.seenAttention));
+    },
+    get unreadCount() {
+      return this.windows.filter(w => this.isUnread(w)).length;
+    },
+
+    // ---- batch operations ----
+    closeableWindows(list) { return (list || this.windows).filter(w => this.et(w) === 'closeable' && w.platform !== 'codex'); },
+    reviewableWindows(list) { return (list || this.windows).filter(w => w.triage === 'completed' && !this.isReviewed(w)); },
+    closeAll(list) {
+      const targets = this.closeableWindows(list);
+      if (!targets.length) return;
+      if (!confirm('关闭 ' + targets.length + ' 个可关闭会话?')) return;
+      targets.forEach(w => this.closeWindow(w.pid));
+      this.toast('已请求关闭 ' + targets.length + ' 个会话');
+    },
+    verifyAll(list) {
+      const targets = this.reviewableWindows(list);
+      targets.forEach(w => this.verify(w));
+      if (targets.length) this.toast('已验收 ' + targets.length + ' 个会话');
+    },
+
+    // ---- browser notifications when a session needs attention (Orca finish-notify) ----
+    toggleNotify() {
+      if (!this.notifyEnabled && 'Notification' in window && Notification.permission !== 'granted') {
+        Notification.requestPermission().then(p => {
+          this.notifyEnabled = (p === 'granted');
+          localStorage.setItem('fleet_notify', this.notifyEnabled ? '1' : '0');
+        });
+        return;
+      }
+      this.notifyEnabled = !this.notifyEnabled;
+      localStorage.setItem('fleet_notify', this.notifyEnabled ? '1' : '0');
+    },
+    _maybeNotify() {
+      if (!this.notifyEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+      for (const w of this.windows) {
+        const t = this.et(w);
+        if (t !== 'waiting_perm' && t !== 'completed') continue;
+        const stamp = w.updated_at || 0;
+        if (this._notified[w.session_id] >= stamp) continue;   // already told about this state
+        if (this.isUnread(w)) {
+          this._notified[w.session_id] = stamp;
+          const label = t === 'waiting_perm' ? '需要授权' : '已完成待验收';
+          try { new Notification('Fleet · ' + label, { body: this.cardName(w) + ' — ' + (w.triage_reason || ''), tag: 'fleet-' + w.session_id }); } catch (e) {}
+        }
+      }
     },
 
     init() {
@@ -1044,6 +1216,7 @@ function fleet() {
     applySnapshot(snap) {
       this.windows = snap.windows || [];
       this.counts = snap.counts || this.counts;
+      this._maybeNotify();
     },
 
     formatIdle(seconds) {
